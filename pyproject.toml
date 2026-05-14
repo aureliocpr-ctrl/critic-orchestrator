@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "critic-orchestrator"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server that spawns N fresh Claude CLI workers in parallel to adversarially verify a claim/fix. Anti-confabulation layer for Claude Code."
 authors = [{name = "Aurelio Caprara", email = "aureliocpr@gmail.com"}]
 readme = "README.md"

@@ -328,10 +328,29 @@ Output JSON conforming to the schema. Last message = JSON object only.
 def _counterexample_worker(
     *, claim: str, diff_summary: str,
 ) -> WorkerSpec:
+    """Counterexample worker — v0.3.0 prompt (debiased + anti-FP check).
+
+    The original v0.2.0 prompt contained the line "Bias hard toward
+    FINDING counterexamples. A 'no counterexample' answer should be
+    the conclusion of work, not a default." A controlled experiment
+    on 2026-05-15 (experiments/exp_variance_bias.py + 6 runs against
+    a ground-truth=TRUE payload) showed that this single line drove
+    the false-positive rate to 100% (3/3 baseline runs invented bugs
+    that did not exist against the codebase as written). Removing the
+    line and adding an explicit false-positive check brought the FP
+    rate to 0% (3/3 debiased runs) with no measurable cost in recall
+    on a separate ground-truth=FALSE experiment (3/3 caught the
+    injected bug under both prompts). See CHANGELOG v0.3.0.
+
+    The anti-FP examples are adapted from the Anthropic code-review
+    plugin (~/.claude/plugins/cache/claude-plugins-official/code-review).
+    """
     safe_claim = _sanitize_for_prompt(claim)
     safe_diff = _sanitize_for_prompt(diff_summary)
     prompt = f"""You are an ADVERSARIAL code reviewer. Your task is to
-break the fix the main agent claims to have made.
+evaluate whether the fix the main agent claims is sound — by attempting
+to construct a concrete, plausible counterexample, OR by honestly
+concluding that none exists.
 
 {_UNTRUSTED_HEADER}
 <UNTRUSTED_INPUT type="claim">
@@ -344,24 +363,37 @@ break the fix the main agent claims to have made.
 
 YOUR EXACT PROCEDURE:
 1. Read the changed code carefully.
-2. Brainstorm scenarios where the fix would NOT cover the bug:
+2. Consider scenarios where the fix would NOT cover the bug:
    - inputs at boundaries (empty, very large, malformed)
    - concurrent access (race conditions the fix didn't address)
    - alternate code paths that bypass the fix
    - assumptions in the fix that may not hold (encoding, locale,
      null handling, integer overflow, etc.)
-3. Pick the most plausible scenario and describe a concrete
-   counterexample.
+3. Decide honestly whether a concrete, plausible counterexample exists.
 
-CRITERIA:
+CRITERIA — BOTH outcomes are equally valid and equally respected:
 - If you identified a concrete scenario with high confidence that
   reproduces the original misbehaviour or introduces a new one,
   counterexample_found = true, claim_holds = false.
-- If after honest effort you cannot construct a counterexample,
-  counterexample_found = false, claim_holds = true.
+- If after honest effort you cannot construct a real counterexample,
+  counterexample_found = false, claim_holds = true. This is a
+  LEGITIMATE conclusion, NOT a default. Do not manufacture weak or
+  speculative counterexamples just to avoid an empty hand.
+  Confabulated bugs are worse than missed bugs.
 
-Bias hard toward FINDING counterexamples. A "no counterexample" answer
-should be the conclusion of work, not a default.
+FALSE-POSITIVE CHECK before finalising. Reject the scenario if ANY
+of these apply (these are the patterns the Anthropic code-review
+plugin explicitly flags as false positives):
+- It's a pre-existing issue unrelated to the diff being reviewed
+- It looks like a bug but isn't actually possible against THIS code
+  (you're describing a hypothetical version, not the code as written)
+- It's a pedantic nitpick a senior engineer would not flag
+- A static type-checker, linter, or compiler would already catch it
+- The scenario lives on lines the diff didn't modify
+- It's a general code-quality issue (test coverage, security in
+  general, documentation) that the claim itself does not address
+- It depends on environmental preconditions (network outage, FS
+  permission error, OS misconfiguration) rather than on the code
 
 Output JSON conforming to the schema. Last message = JSON object only.
 """

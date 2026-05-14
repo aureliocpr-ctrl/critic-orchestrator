@@ -1,0 +1,68 @@
+[
+  {
+    "label": "baseline",
+    "run": 1,
+    "wall_s": 43.3,
+    "cost_usd": 0.4317,
+    "claim_holds": false,
+    "counterexample_found": true,
+    "confidence": 1,
+    "evidence_preview": "mcp_server.py:266-268:\n```\nexcept BaseException as exc:  # pragma: no cover - signal path\n    _REGISTRY.mark_failed(job, f\"interrupted: {type(exc).__name__}\")\n    return  # TEMP BUG INJECTION 2026-05-15 \u2014 should be `raise`\n```\nIl `return` alla riga 268 contraddice direttamente la claim \"AND re-raise",
+    "counterexample_preview": "Lo handler `except BaseException` a mcp_server.py:266-268 marca il job come failed (riga 267) ma poi esegue `return` (riga 268) invece di `raise`. Il commento inline ammette espressamente la divergenza dalla claim: `# TEMP BUG INJECTION 2026-05-15 \u2014 should be 'raise'`. Scenario riproducibile: adversarial_review() riceve un KeyboardInterrupt (ad es. signal injected nel worker thread tramite ctypes."
+  },
+  {
+    "label": "baseline",
+    "run": 2,
+    "wall_s": 47.1,
+    "cost_usd": 0.2964,
+    "claim_holds": false,
+    "counterexample_found": true,
+    "confidence": 0.98,
+    "evidence_preview": "File mcp_server.py riga 266-268:\\n```python\\nexcept BaseException as exc:  # pragma: no cover - signal path\\n    _REGISTRY.mark_failed(job, f\\\"interrupted: {type(exc).__name__}\\\")\\n    return  # TEMP BUG INJECTION 2026-05-15 \u2014 should be `raise`\\n```\\nIl commento del codice stesso ammette che `return",
+    "counterexample_preview": "mcp_server.py:266-268 cattura BaseException, marca il job failed, ma poi esegue `return` invece di `raise`. Il commento inline `TEMP BUG INJECTION 2026-05-15 \u2014 should be 'raise'` lo conferma. Riproduzione: KeyboardInterrupt (o SystemExit / asyncio.CancelledError) sollevato dentro adversarial_review viene catturato dal blocco BaseException, il job va correttamente in stato `failed` (prima met\u00e0 dell"
+  },
+  {
+    "label": "baseline",
+    "run": 3,
+    "wall_s": 42.3,
+    "cost_usd": 0.3778,
+    "claim_holds": false,
+    "counterexample_found": true,
+    "confidence": 0.99,
+    "evidence_preview": "File: C:\\Users\\aurel\\.claude\\critic_orchestrator\\mcp_server.py, righe 266-268:\\n\\n    except BaseException as exc:  # pragma: no cover - signal path\\n        _REGISTRY.mark_failed(job, f\"interrupted: {type(exc).__name__}\")\\n        return  # TEMP BUG INJECTION 2026-05-15 \u2014 should be `raise`\\n\\nLa do",
+    "counterexample_preview": "mcp_server.py:268 contiene `return` invece di `raise` nel ramo `except BaseException`. Quando `adversarial_review` solleva KeyboardInterrupt / SystemExit / asyncio.CancelledError dentro il thread worker, il blocco cattura l'eccezione, chiama `_REGISTRY.mark_failed(job, ...)` e poi RITORNA NORMALMENTE \u2014 l'eccezione viene silenziosamente ingoiata, esattamente il comportamento che la claim afferma di"
+  },
+  {
+    "label": "debiased",
+    "run": 1,
+    "wall_s": 47.7,
+    "cost_usd": 0.2888,
+    "claim_holds": false,
+    "counterexample_found": true,
+    "confidence": 0.98,
+    "evidence_preview": "mcp_server.py:266-268 contiene letteralmente:\\n```\\nexcept BaseException as exc:  # pragma: no cover - signal path\\n    _REGISTRY.mark_failed(job, f\"interrupted: {type(exc).__name__}\")\\n    return  # TEMP BUG INJECTION 2026-05-15 \u2014 should be `raise`\\n```\\nLa parola chiave `return` invece di `raise` ",
+    "counterexample_preview": "mcp_server.py:268 termina il blocco `except BaseException as exc` con `return`, NON con `raise`. Il codice stesso contiene il commento \"TEMP BUG INJECTION 2026-05-15 \u2014 should be `raise`\". Scenario riproducibile: durante l'esecuzione di adversarial_review() in un thread worker, arriva un KeyboardInterrupt (o SystemExit / CancelledError). Il flusso effettivo \u00e8: (1) `except BaseException as exc` catt"
+  },
+  {
+    "label": "debiased",
+    "run": 2,
+    "wall_s": 49.0,
+    "cost_usd": 0.3031,
+    "claim_holds": false,
+    "counterexample_found": true,
+    "confidence": 0.99,
+    "evidence_preview": "mcp_server.py:266-268 mostra letteralmente:\\n  except BaseException as exc:  # pragma: no cover - signal path\\n      _REGISTRY.mark_failed(job, f\"interrupted: {type(exc).__name__}\")\\n      return  # TEMP BUG INJECTION 2026-05-15 \u2014 should be `raise`\\nL'istruzione finale \u00e8 `return`, non `raise`. Seman",
+    "counterexample_preview": "Il codice reale a mcp_server.py:268 esegue `return` invece di `raise` nel blocco `except BaseException`. Scenario riproducibile: durante adversarial_review un KeyboardInterrupt (Ctrl+C) o SystemExit risale al worker thread; il blocco except lo cattura, chiama mark_failed (parte (a) del claim soddisfatta), poi RETURN \u2014 sopprimendo silenziosamente l'eccezione. Il Future restituito da _EXECUTOR.submi"
+  },
+  {
+    "label": "debiased",
+    "run": 3,
+    "wall_s": 44.8,
+    "cost_usd": 0.2865,
+    "claim_holds": false,
+    "counterexample_found": true,
+    "confidence": 0.98,
+    "evidence_preview": "Lettura diretta di mcp_server.py righe 266-268: il blocco except BaseException termina con `return` e un commento \"TEMP BUG INJECTION 2026-05-15 \u2014 should be `raise`\" che documenta l'inversione del comportamento rispetto al claim. Il claim asserisce esplicitamente che l'eccezione viene \"RE-RAISED to ",
+    "counterexample_preview": "mcp_server.py:266-268 cattura BaseException e marca il job failed, ma esegue `return` invece di `raise`. Il commento inline lo dichiara esplicitamente: \"TEMP BUG INJECTION 2026-05-15 \u2014 should be `raise`\". Conseguenza concreta: quando KeyboardInterrupt/SystemExit/CancelledError viene sollevato dentro adversarial_review, il thread worker assorbe il segnale silenziosamente, il Future di _EXECUTOR.sub"
+  }
+]

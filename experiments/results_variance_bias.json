@@ -1,0 +1,74 @@
+[
+  {
+    "label": "baseline",
+    "run": 1,
+    "wall_s": 94.4,
+    "cost_usd": 0.6985,
+    "duration_api_ms": 83084,
+    "claim_holds": false,
+    "counterexample_found": true,
+    "confidence": 0.85,
+    "evidence_preview": "mcp_server.py:298-316 mostra che il body di start_adversarial_review chiama _parse_common(arguments) PRIMA di _EXECUTOR.submit. _parse_common (mcp_server.py:215-240) esegue sincronamente: Path(argumen",
+    "counterexample_preview": "Chiamare start_adversarial_review con project_dir su un UNC path verso host non raggiungibile, es. project_dir=\"\\\\\\\\10.255.255.1\\\\share\\\\proj\". Il fix sposta adversarial_review() nell'executor ma _parse_common() resta sincrono nel handler MCP, e a mcp_server.py:225 esegue Path(arguments.get('project"
+  },
+  {
+    "label": "baseline",
+    "run": 2,
+    "wall_s": 102.9,
+    "cost_usd": 0.5993,
+    "duration_api_ms": 88935,
+    "claim_holds": false,
+    "counterexample_found": true,
+    "confidence": 0.9,
+    "evidence_preview": "Catena dei fatti dal codice letto: (1) mcp_server.py:298-316 mostra che il branch `start_adversarial_review` chiama `_parse_common(arguments)` PRIMA di `_REGISTRY.create` e `_EXECUTOR.submit`. (2) _pa",
+    "counterexample_preview": "Chiamare `start_adversarial_review` con un `claim` molto grande (es. 50\u2013100 MB) e/o `diff_summary` analogo, fornendo anche `test_path` e `fixed_function` per attivare tutti e tre i worker. Esempio minimale riproducibile: claim = \"A\"*50_000_000 con qualche \"\\\\x1b\" sparso, diff_summary = \"B\"*50_000_00"
+  },
+  {
+    "label": "baseline",
+    "run": 3,
+    "wall_s": 108.3,
+    "cost_usd": 0.5752,
+    "duration_api_ms": 98076,
+    "claim_holds": false,
+    "counterexample_found": true,
+    "confidence": 0.9,
+    "evidence_preview": "Files inspected: mcp_server.py (start_adversarial_review handler at 298-316, _parse_common at 215-240, _SHARED_INPUT_PROPS at 82-108), default_workers.py (build_default_workers does only regex+string ",
+    "counterexample_preview": "In mcp_server.py:298-316, the start_adversarial_review handler runs _parse_common(arguments) SYNCHRONOUSLY on the MCP server's asyncio thread BEFORE _EXECUTOR.submit(...). _parse_common contains `Path(arguments.get('project_dir') or os.getcwd()).resolve()` (mcp_server.py:225). On Windows, Path.resol"
+  },
+  {
+    "label": "debiased",
+    "run": 1,
+    "wall_s": 121.1,
+    "cost_usd": 0.5946,
+    "duration_api_ms": 108250,
+    "claim_holds": true,
+    "counterexample_found": false,
+    "confidence": 0.85,
+    "evidence_preview": "Traced start_adversarial_review at mcp_server.py:298-316. Body is purely synchronous, non-blocking work: _parse_common (regex + string fmt + Path.resolve), JobRegistry.create (secrets.token_hex + dict",
+    "counterexample_preview": ""
+  },
+  {
+    "label": "debiased",
+    "run": 2,
+    "wall_s": 92.8,
+    "cost_usd": 0.5479,
+    "duration_api_ms": 82696,
+    "claim_holds": true,
+    "counterexample_found": false,
+    "confidence": 0.9,
+    "evidence_preview": "Reviewed mcp_server.py, job_registry.py, default_workers.py.\n\nSynchronous portion of start_adversarial_review handler (mcp_server.py:298-316) consists of:\n1. _parse_common: string strip/length checks,",
+    "counterexample_preview": ""
+  },
+  {
+    "label": "debiased",
+    "run": 3,
+    "wall_s": 90.1,
+    "cost_usd": 0.5311,
+    "duration_api_ms": 78381,
+    "claim_holds": true,
+    "counterexample_found": false,
+    "confidence": 0.85,
+    "evidence_preview": "Letti mcp_server.py:54-75 (executor module-level), 298-316 (start_adversarial_review), default_workers.py (sanitize clip 4kB), job_registry.py (create con RLock + GC O(N=120)). Il path di start_advers",
+    "counterexample_preview": ""
+  }
+]

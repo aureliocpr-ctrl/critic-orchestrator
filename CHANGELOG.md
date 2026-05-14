@@ -1,5 +1,119 @@
 # Changelog
 
+## 0.3.0 — 2026-05-15 — Counterexample prompt debiasing (empirical)
+
+### TL;DR
+
+The counterexample worker prompt had a single line —
+`"Bias hard toward FINDING counterexamples. A 'no counterexample'
+answer should be the conclusion of work, not a default"` — that
+drove the **false-positive rate to 100%** in a controlled
+experiment. Removing it and adding an explicit false-positive check
+brings the FP rate to **0%** with no measurable cost in recall.
+This release ships only the prompt change. No architectural change.
+
+### The experiment that drove this release
+
+Two symmetric experiments under `experiments/`:
+
+**1. `exp_variance_bias.py`** — ground truth = `claim_holds=TRUE`
+(feature really implemented in `mcp_server.py:71`). N=3 baseline +
+N=3 debiased. Measures **false-positive rate**.
+
+| Condition | claim_holds=TRUE | counterexample_found=False | FP rate |
+|---|---|---|---|
+| baseline (v0.2.0 prompt with "Bias hard toward FINDING") | 0/3 | 0/3 | **3/3 = 100%** |
+| debiased (no "Bias hard", + anti-FP check) | 3/3 | 3/3 | **0/3 = 0%** |
+
+The 3 baseline false positives were all inventions: a UNC path the
+fix never claimed to handle, a 50 MB claim string (sanitizer clips
+at 4 KB), `Path.resolve()` "slow" on Windows (it's millisecond).
+Each fell under at least one Anthropic-documented false-positive
+pattern.
+
+**2. `exp_bug_injection.py`** — ground truth = `claim_holds=FALSE`
+(temporary controlled bug: replaced `raise` after `mark_failed` with
+`return` at `mcp_server.py:268`, then reverted). Measures **false-
+negative rate**.
+
+| Condition | claim_holds=FALSE | counterexample_found=True | FN rate |
+|---|---|---|---|
+| baseline | 3/3 | 3/3 | **0/3 = 0%** |
+| debiased | 3/3 | 3/3 | **0/3 = 0%** |
+
+Both prompts caught the injected bug 3/3 times. Recall is preserved.
+
+**Confidence is uncorrelated with correctness.** Across both
+experiments the worker's self-reported `confidence` sat in the
+0.85-0.99 band whether the verdict was correct (TP, TN) or wrong
+(FP). A confidence-threshold filter (à la Anthropic's
+`code-review.md` step 5-6) would have rejected zero of the FPs we
+saw. We do NOT ship confidence-based filtering.
+
+**Limit of the experiment**: only one ground-truth-FALSE case, and
+the injected bug was obvious (a one-line `return` vs `raise`). The
+test does not yet probe whether the debiased prompt misses *subtle*
+bugs. This is the known weakness of v0.3.0; addressing it requires
+a richer ground-truth corpus.
+
+### Changed
+
+- `default_workers.py::_counterexample_worker` prompt rewritten:
+  - Opens with "evaluate whether the fix is sound — OR honestly
+    conclude none exists", instead of "break the fix".
+  - Both `counterexample_found=True` and `counterexample_found=False`
+    explicitly marked as equally valid outcomes.
+  - Added the slogan "Confabulated bugs are worse than missed bugs".
+  - 7-bullet "FALSE-POSITIVE CHECK" section adapted from the
+    Anthropic code-review plugin's list of FP patterns:
+    pre-existing issues, hypothetical-version bugs, pedantic
+    nitpicks, linter-catchable issues, lines outside diff,
+    general code-quality issues, environmental preconditions.
+- `tests/test_hardening.py` gains 3 pinned tests so a future
+  regression on the prompt is caught by CI:
+  - `test_counterexample_prompt_does_not_force_finding`
+  - `test_counterexample_prompt_legitimises_no_counterexample`
+  - `test_counterexample_prompt_has_false_positive_check`
+
+### Added
+
+- `experiments/exp_variance_bias.py` — FP-rate harness.
+- `experiments/exp_bug_injection.py` — FN-rate harness.
+- `experiments/results_variance_bias.json` — raw run data (6 runs).
+- `experiments/results_bug_injection.json` — raw run data (6 runs).
+
+### Not changed (deliberately)
+
+Three modifications that were *suggested* by independent reviewers
+or by an earlier reading of the Anthropic code-review plugin —
+**none of them survived the empirical test**:
+
+- **Confidence-weighted voting.** Suggested by an earlier review.
+  Smoke data shows confidence is identical for correct and wrong
+  verdicts (0.88 vs 0.87 across our 12 runs). Not shipped.
+- **Ensemble / N-of-M majority voting.** Suggested as a cure for
+  LLM noise. Smoke data shows zero within-condition variance
+  (3/3 identical verdicts in every cell) — the worker is not
+  noisy, it is *systematically* biased by the prompt. Ensembles
+  do not help. Not shipped.
+- **Second-stage scoring agent** (Anthropic-style "Haiku scores
+  the score"). Cost ~+50% per review; the bias is upstream of the
+  scoring step, so a second pass on the same biased verdict
+  would not necessarily decorrelate. Deferred until we have data
+  showing it helps.
+
+### Total test count
+
+53 → **56 passing in ~1.7s**.
+
+### Cost of the experiments that drove this release
+
+12 real `claude --print` worker runs, **$5.03 of subscription
+tokens** (no Anthropic API key touched). Receipts in
+`experiments/results_*.json`.
+
+---
+
 ## 0.2.0 — 2026-05-13 — Async-job pattern + hardening
 
 ### Added

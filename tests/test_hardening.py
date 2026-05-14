@@ -286,6 +286,66 @@ def test_workers_sanitise_injected_close_tag() -> None:
 
 
 # ---------------------------------------------------------------------------
+# v0.3.0 prompt debiasing (pinned by empirical experiment)
+# ---------------------------------------------------------------------------
+
+def test_counterexample_prompt_does_not_force_finding() -> None:
+    """The v0.2.0 line "Bias hard toward FINDING counterexamples"
+    drove the false-positive rate to 100% in a controlled experiment
+    on 2026-05-15 (experiments/exp_variance_bias.py). It is removed
+    in v0.3.0. This test prevents regression.
+    """
+    workers = build_default_workers(
+        claim="x", diff_summary="y",
+        test_path=None, fixed_function=None,
+    )
+    cx_prompt = workers[0].prompt
+    assert "Bias hard toward FINDING" not in cx_prompt
+    assert "Bias hard" not in cx_prompt
+
+
+def test_counterexample_prompt_legitimises_no_counterexample() -> None:
+    """The v0.3.0 prompt must explicitly tell the worker that
+    `counterexample_found=false` is a legitimate, equally respected
+    outcome — not a default to avoid.
+    """
+    workers = build_default_workers(
+        claim="x", diff_summary="y",
+        test_path=None, fixed_function=None,
+    )
+    cx_prompt = workers[0].prompt
+    assert "LEGITIMATE conclusion" in cx_prompt
+    assert "Confabulated bugs are worse than missed bugs" in cx_prompt
+
+
+def test_counterexample_prompt_has_false_positive_check() -> None:
+    """The v0.3.0 prompt must include the FALSE-POSITIVE CHECK section
+    listing the patterns that should NOT be reported as counterexamples
+    (adapted from the Anthropic code-review plugin).
+    """
+    workers = build_default_workers(
+        claim="x", diff_summary="y",
+        test_path=None, fixed_function=None,
+    )
+    cx_prompt = workers[0].prompt
+    assert "FALSE-POSITIVE CHECK" in cx_prompt
+    # At least three of the named exclusion patterns must be present
+    # to ensure the section was not accidentally truncated.
+    expected = [
+        "pre-existing issue",
+        "hypothetical version",
+        "pedantic nitpick",
+        "lines the diff didn't modify",
+        "environmental preconditions",
+    ]
+    hits = sum(1 for line in expected if line in cx_prompt)
+    assert hits >= 3, (
+        f"Expected at least 3 anti-FP patterns in prompt, found {hits}: "
+        f"present={[line for line in expected if line in cx_prompt]}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # GC on every read path
 # ---------------------------------------------------------------------------
 
