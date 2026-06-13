@@ -203,9 +203,17 @@ def _spawn_worker(
     its natural timeout.
     """
     mcp_config = {"mcpServers": extra_mcp or {}}
+    # Pin the worker model explicitly (2026-06-13): without --model the
+    # `claude --print` subprocess inherits whatever model the parent MCP
+    # server was spawned with. When that was Claude Fable 5 (now retired),
+    # every worker died with "Fable 5 is currently unavailable" and the job
+    # came back 3-invalid. Env CRITIC_WORKER_MODEL overrides; default opus.
+    import os as _os_model
+    _worker_model = _os_model.environ.get("CRITIC_WORKER_MODEL", "opus").strip() or "opus"
     cmd: list[str] = [
         "claude",
         "--print",
+        "--model", _worker_model,
         "--output-format", "json",
         "--strict-mcp-config",
         "--mcp-config", json.dumps(mcp_config),
