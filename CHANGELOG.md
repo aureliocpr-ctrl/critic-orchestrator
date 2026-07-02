@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.4.0 — 2026-07-01 — Multi-provider backends
+
+### Added
+- Provider backends (`backends.py`): run the reviewers through the Claude
+  CLI (agentic — all workers) OR any OpenAI-compatible API / the Anthropic
+  API (reasoning-only). Selected via `CRITIC_BACKEND`
+  (`claude_cli` | `openai_compat` | `anthropic_api`) + `CRITIC_MODEL`.
+  No new dependency — the API backends use `urllib`.
+- Honest capability split: reviewers that need real tools
+  (`falsification`, `caller_verification`) carry `requires_execution=True`
+  and are reported `skipped: requires an agentic backend` on API backends —
+  never faked. `counterexample` (reasoning) runs on any provider.
+- Per-provider structured-output negotiation (`CRITIC_JSON_MODE=auto`,
+  default): tries `json_schema` → `json_object` → none, falling back only
+  on the specific "response_format unsupported" 400.
+- Temperature is omitted unless `CRITIC_TEMPERATURE` is set.
+
+### Verified live (2026-07-01)
+- Moonshot `kimi-k2.7-code`: accepts `json_schema`; rejects `temperature != 1`
+  (hence temperature omitted by default). Reasoning reviewer returned a
+  correct, schema-conforming verdict (~15 s).
+- DeepSeek `deepseek-v4-pro`: rejects `json_schema` → auto-fell-back to
+  `json_object`; reasoning reviewer returned a correct verdict (~9 s).
+
+### Tests
+- 56 → **75 passing** (+19: backend unit tests incl. format-fallback,
+  temperature omission, and env-driven selection).
+
+---
+
 ## 0.3.0 — 2026-05-15 — Counterexample prompt debiasing (empirical)
 
 ### TL;DR

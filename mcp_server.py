@@ -42,6 +42,7 @@ import mcp.types as t
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+from .backends import make_backend_from_env
 from .default_workers import build_default_workers
 from .job_registry import Job, JobRegistry
 from .orchestrator import adversarial_review
@@ -240,16 +241,17 @@ def _parse_common(arguments: dict[str, Any]) -> dict[str, Any] | str:
     }
 
 
-def _run_review_in_thread(job: Job) -> None:
+def _run_review_in_thread(job: Job, backend: Any | None = None) -> None:
     """Body of the background task: run adversarial_review and store
     the result in the job. Called inside an executor thread.
 
-    We use `BaseException` rather than `Exception` so a worker thread
-    interrupted by KeyboardInterrupt / SystemExit / CancelledError
-    leaves the job in a `failed` terminal state instead of stuck on
-    `running` forever (where `poll` would never resolve). The
-    exception is re-raised so the thread itself surfaces the signal
-    to whatever upstream watcher is listening.
+    `backend` is the provider backend selected at start time (None = the
+    built-in Claude CLI path). We use `BaseException` rather than
+    `Exception` so a worker thread interrupted by KeyboardInterrupt /
+    SystemExit / CancelledError leaves the job in a `failed` terminal
+    state instead of stuck on `running` forever (where `poll` would never
+    resolve). The exception is re-raised so the thread itself surfaces the
+    signal to whatever upstream watcher is listening.
     """
     try:
         report = adversarial_review(
@@ -259,6 +261,7 @@ def _run_review_in_thread(job: Job) -> None:
             timeout=job.timeout_s,
             popen_sink=job.popen_handles,
             cancel_check=lambda: job.aborted,
+            backend=backend,
         )
     except Exception as exc:
         _REGISTRY.mark_failed(job, f"orchestrator error: {exc!r}")
@@ -282,6 +285,11 @@ async def _call_tool_impl(
         if isinstance(parsed, str):
             return [t.TextContent(type="text",
                                    text=json.dumps({"error": parsed}))]
+        try:
+            backend = make_backend_from_env()
+        except ValueError as exc:
+            return [t.TextContent(type="text",
+                                   text=json.dumps({"error": str(exc)}))]
         loop = asyncio.get_running_loop()
         report = await loop.run_in_executor(
             _EXECUTOR,
@@ -290,6 +298,7 @@ async def _call_tool_impl(
                 project_dir=parsed["project_dir"],
                 workers=parsed["workers"],
                 timeout=parsed["timeout_s"],
+                backend=backend,
             ),
         )
         return [t.TextContent(type="text",
@@ -300,6 +309,11 @@ async def _call_tool_impl(
         if isinstance(parsed, str):
             return [t.TextContent(type="text",
                                    text=json.dumps({"error": parsed}))]
+        try:
+            backend = make_backend_from_env()
+        except ValueError as exc:
+            return [t.TextContent(type="text",
+                                   text=json.dumps({"error": str(exc)}))]
         job = _REGISTRY.create(
             claim=parsed["claim"],
             project_dir=parsed["project_dir"],
@@ -311,7 +325,7 @@ async def _call_tool_impl(
         # the `asyncio.run()` shutdown sweep that would otherwise block
         # this handler until the review finishes. The job's terminal
         # state is set by _run_review_in_thread itself; poll reads it.
-        _EXECUTOR.submit(_run_review_in_thread, job)
+        _EXECUTOR.submit(_run_review_in_thread, job, backend)
         return [t.TextContent(type="text",
                                text=json.dumps(job.as_dict()))]
 

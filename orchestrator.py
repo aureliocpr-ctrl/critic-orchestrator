@@ -89,6 +89,12 @@ class WorkerSpec:
     # commands like `git stash` and `pytest` — required by the
     # falsification worker, not by the others.
     permission_mode: str = "plan"
+    # True iff this worker needs real tool access (Bash/Grep/Read of the
+    # repo) to do its job — i.e. it cannot be run by a reasoning-only API
+    # backend. Set on falsification (git stash + pytest) and
+    # caller_verification (grep call sites). A reasoning-only backend
+    # reports such a worker as "skipped" instead of fabricating a verdict.
+    requires_execution: bool = False
 
 
 @dataclass
@@ -398,6 +404,31 @@ def _spawn_worker(
     )
 
 
+def _run_via_backend(
+    backend: Any, spec: WorkerSpec, project_dir: Path, timeout: int,
+) -> WorkerVerdict:
+    """Run one worker through a provider backend (duck-typed: any object
+    with a `run_worker(spec, project_dir, timeout) -> BackendResult`).
+
+    Times the call and wraps the BackendResult into a WorkerVerdict so the
+    aggregation path is identical to the CLI path. Any exception raised by
+    the backend is captured as a non-ok verdict rather than crashing the
+    whole review.
+    """
+    t0 = time.perf_counter()
+    try:
+        res = backend.run_worker(spec, project_dir, timeout)
+        verdict, error = res.verdict, res.error
+        cost, preview = res.cost_usd, res.raw_preview
+    except Exception as exc:  # pragma: no cover - defensive
+        verdict, error, cost, preview = None, f"backend error: {exc!r}", 0.0, ""
+    wall_ms = int((time.perf_counter() - t0) * 1000)
+    return WorkerVerdict(
+        name=spec.name, verdict=verdict, error=error,
+        cost_usd=cost, duration_ms=wall_ms, raw_stdout_preview=preview,
+    )
+
+
 def adversarial_review(
     claim: str,
     project_dir: Path,
@@ -408,6 +439,7 @@ def adversarial_review(
     max_parallel: int = 4,
     popen_sink: list[subprocess.Popen] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    backend: Any | None = None,
 ) -> CriticReport:
     """Run every worker in parallel and aggregate their votes.
 
@@ -431,13 +463,20 @@ def adversarial_review(
     t0 = time.perf_counter()
     n_parallel = max(1, min(max_parallel, len(workers)))
     with ThreadPoolExecutor(max_workers=n_parallel) as pool:
-        futures = [
-            pool.submit(_spawn_worker, spec, project_dir,
-                          timeout, extra_mcp,
-                          popen_sink=popen_sink,
-                          cancel_check=cancel_check)
-            for spec in workers
-        ]
+        if backend is None:
+            futures = [
+                pool.submit(_spawn_worker, spec, project_dir,
+                              timeout, extra_mcp,
+                              popen_sink=popen_sink,
+                              cancel_check=cancel_check)
+                for spec in workers
+            ]
+        else:
+            futures = [
+                pool.submit(_run_via_backend, backend, spec,
+                              project_dir, timeout)
+                for spec in workers
+            ]
         results = [f.result() for f in futures]
     wall_ms = int((time.perf_counter() - t0) * 1000)
 
