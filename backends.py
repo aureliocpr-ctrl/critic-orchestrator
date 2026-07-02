@@ -36,8 +36,15 @@ So the OpenAI-compatible backend tries, in order, `json_schema` →
 falling back only on the specific "response_format unsupported" 400, and
 never sends a temperature unless `CRITIC_TEMPERATURE` is set.
 
+A third family bridges the gap on Windows:
+
+  * GHOST-CLI (`ghost_cli`, see ghost_backend.py) — a fresh INTERACTIVE
+    hidden Claude session per worker, driven via `clp ai-eye`. Agentic
+    (runs execution workers) but WITHOUT `claude --print`, so it stays on
+    the flat subscription when headless calls become metered.
+
 Selection via env (`make_backend_from_env`):
-    CRITIC_BACKEND = claude_cli (default) | anthropic_api | openai_compat
+    CRITIC_BACKEND = claude_cli (default) | ghost_cli | anthropic_api | openai_compat
     CRITIC_MODEL   = model id (required for the API backends)
     CRITIC_JSON_MODE = auto (default) | json_schema | json_object | none
     CRITIC_TEMPERATURE = optional float (omitted unless set)
@@ -256,6 +263,10 @@ def make_backend_from_env() -> Any | None:
     kind = (os.environ.get("CRITIC_BACKEND") or "claude_cli").strip().lower()
     if kind in ("", "claude_cli", "cli", "claude"):
         return None
+    if kind in ("ghost_cli", "ghost"):
+        # Lazy import: ghost_backend imports BackendResult from here.
+        from .ghost_backend import make_ghost_backend_from_env
+        return make_ghost_backend_from_env()
     if kind in ("anthropic_api", "anthropic"):
         key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
         if not key:
@@ -292,9 +303,10 @@ __all__ = [
 ]
 
 # NOTE — pluggable agent CLIs (Codex, Cursor CLI, etc.)
-# The built-in Claude CLI backend lives in orchestrator._spawn_worker.
-# A generic `CommandBackend` (argv template + stdout JSON extractor) is the
-# planned way to add other agent CLIs as *agentic* (execution-capable)
-# backends. It is deliberately NOT shipped yet: each agent exposes
+# The built-in Claude CLI backend lives in orchestrator._spawn_worker; the
+# first alternative AGENTIC backend is ghost_cli (ghost_backend.py, hidden
+# interactive Claude sisters — Windows-only). A generic `CommandBackend`
+# (argv template + stdout JSON extractor) remains the planned way to add
+# other agent CLIs. It is deliberately NOT shipped yet: each agent exposes
 # structured JSON output through different flags, and inventing those flags
 # unverified would be exactly the confabulation this tool exists to prevent.

@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.5.0 — 2026-07-02 — Ghost-CLI backend: full triad without `claude --print`
+
+### Added
+- `ghost_backend.py` — `CRITIC_BACKEND=ghost_cli`: each reviewer runs in a
+  fresh **hidden interactive** Claude session ("ghost sister"), spawned
+  `CREATE_NEW_CONSOLE` + `SW_HIDE` (invisible from birth) and driven via the
+  `clp ai-eye` Win32 console transport. Long prompts travel by filesystem
+  handshake (prompt file in, ONE short injected line, verdict JSON polled
+  from a response file). The first alternative **agentic** backend: it runs
+  `falsification` and `caller_verification` too — no `claude --print`, so
+  reviews stay on the flat subscription when headless calls become metered.
+  Technique ported from Engram's interactive judge (validated live
+  2026-07-02, 10/10 decision agreement vs `claude -p`).
+- Fresh sister per reviewer (adversarial independence: no shared session
+  between falsification and counterexample), tree-killed in a `finally`.
+- Lifecycle hardening: module-level live-sister registry with `atexit`
+  sweep (an MCP server dying mid-review leaks no hidden `claude.exe`) and a
+  hard cap `CRITIC_GHOST_MAX_SISTERS` (default 4) that fails fast with an
+  honest error instead of piling invisible consoles onto the machine.
+- Env: `CRITIC_WORKER_MODEL` (model pin, same var as the CLI path),
+  `CRITIC_GHOST_BOOT_TIMEOUT` (default 60 s). Windows-only by declaration:
+  `make_backend_from_env` raises a clear `ValueError` elsewhere.
+
+### Verified live (2026-07-02)
+- Execution reviewer (real `pytest` run) inside a ghost sister on a scratch
+  project: correct verdict `{claim_holds: true, evidence: "1 passed in
+  0.54s"}` via the response file, 31.4 s wall.
+- True ghost: `MainWindowHandle == 0` at every 5 s sample while alive.
+- No leak: zero new `claude.exe` processes after `run_worker` returned.
+
+### Tests
+- 75 → **93 passing** (+18: handshake contract, fenced/malformed/timeout
+  responses, inject/start failures always close the session, cap fail-fast,
+  slot release, registry thread-safety, boot trust-dialog handling, boot
+  timeout with tail preview, env selection incl. non-Windows rejection).
+
+---
+
 ## 0.4.0 — 2026-07-01 — Multi-provider backends
 
 ### Added

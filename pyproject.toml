@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "critic-orchestrator"
-version = "0.4.0"
+version = "0.5.0"
 description = "MCP server that spawns adversarial reviewers in parallel (Claude CLI, or any OpenAI-compatible / Anthropic API) to verify a claim/fix. Anti-confabulation layer for AI coding agents."
 authors = [{name = "Aurelio Caprara", email = "aureliocpr@gmail.com"}]
 readme = "README.md"

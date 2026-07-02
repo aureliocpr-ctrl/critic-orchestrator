@@ -62,6 +62,7 @@ There is a hard, honest capability split:
 | Backend | `CRITIC_BACKEND` | Can run | Notes |
 |---|---|---|---|
 | Claude CLI (agentic) | `claude_cli` (default) | **all 3 reviewers** | Has real Bash/Grep/Read tools, so it can run the test and grep call sites. Uses your Claude Code subscription — no API key. |
+| Ghost CLI (agentic) | `ghost_cli` | **all 3 reviewers** | Windows-only. Each reviewer runs in a fresh **hidden interactive** Claude session (no `claude --print` anywhere), driven via the `clp ai-eye` console transport with a filesystem handshake. Stays on the flat subscription when headless calls become metered. |
 | Any OpenAI-compatible API | `openai_compat` | `counterexample` (reasoning) | OpenAI, DeepSeek, Moonshot/Kimi, OpenRouter, Groq, local vLLM/Ollama. One shot, JSON-schema output. |
 | Anthropic API | `anthropic_api` | `counterexample` (reasoning) | Native Messages API, structured output. |
 
@@ -87,6 +88,11 @@ export CRITIC_API_KEY=...        # your key
 export CRITIC_BACKEND=anthropic_api
 export ANTHROPIC_API_KEY=...
 export CRITIC_MODEL=claude-sonnet-5
+
+# Example: full triad WITHOUT claude --print (Windows + clp arsenal)
+export CRITIC_BACKEND=ghost_cli
+export CRITIC_WORKER_MODEL=opus            # model pin for the sisters
+export CRITIC_GHOST_MAX_SISTERS=4          # hard cap on hidden sessions
 ```
 
 Temperature is not sent unless you set `CRITIC_TEMPERATURE` — some reasoning
@@ -100,7 +106,7 @@ models reject any value other than their default.
 git clone https://github.com/aureliocpr-ctrl/critic-orchestrator.git
 cd critic-orchestrator
 python -m pip install -e .[dev]
-python -m pytest tests -q        # 75 passed in ~2s
+python -m pytest tests -q        # 93 passed in ~3s
 ```
 
 Requires Python ≥ 3.12 and `psutil`. The default Claude CLI backend also needs
@@ -181,8 +187,12 @@ that the data showed didn't help.
 
 ## Verified
 
-- Test suite: **75/75 green** in ~2 s (`python -m pytest tests -q`).
+- Test suite: **93/93 green** in ~3 s (`python -m pytest tests -q`).
 - Claude CLI backend: end-to-end smoke via `smoke_live.py`.
+- Ghost CLI backend: **live smoke 2026-07-02** — an execution reviewer ran a
+  real `pytest` inside a hidden sister (verdict + verbatim pytest summary via
+  the response file, 31.4 s wall), `MainWindowHandle == 0` on every sample
+  while alive (true ghost), zero `claude.exe` left after the run (tree-kill).
 - OpenAI-compatible backend: unit-tested (mocked transport) and **live
   smoke-tested against two providers with different quirks** — Moonshot Kimi
   `k2.7-code` (accepts `json_schema`, rejects `temperature != 1`) and DeepSeek
