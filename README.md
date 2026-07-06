@@ -204,6 +204,5 @@ that the data showed didn't help.
 
 ## License
 
-Source-available: the code is public for inspection and learning.
-© 2026 Aurelio Capriello. Not yet licensed for reuse or redistribution — an
-open-source license is under consideration. If you'd like to use it, reach out.
+**MIT** © 2026 Aurelio Capriello. See [LICENSE](./LICENSE). Free to use, modify,
+and redistribute — attribution appreciated.
