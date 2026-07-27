@@ -48,6 +48,54 @@ The reviewers run in an async job model: `start_adversarial_review` returns a
 
 ---
 
+## Before the fix: design review (the no-claim gate)
+
+The three reviewers above verify a *claim* against a *diff* — they run
+**after** a change. That contract has a measured failure mode: the proposer
+writes the claim, and the claim silently defines the review perimeter (the
+counterexample reviewer is instructed to discard findings outside the claim).
+The review then scores the proposer's prudence, not the artifact — observed
+here as four consecutive 3-0 `claim_holds` votes on changes where deterministic
+mutation testing later found five theatre-tests.
+
+`start_design_review` is the structural cure. It reviews **modules or a design
+doc, before or without a fix**, and it accepts **no claim and no diff** — by MCP
+schema, not by convention. The reviewers read the files raw and infer what the
+code is *for* from the artifact itself:
+
+| Reviewer | Lens | Human practice it encodes |
+|---|---|---|
+| `premortem` | "It **has** failed — reconstruct the post-mortem." | Klein's prospective hindsight (measurably out-produces "please critique this"), with an honest empty-handed exit. |
+| `perimeter` | "Is this the **right problem**?" Category errors, not tuning. | Murder-board / red-team: the reviewer may attack the frame, not only the build. |
+| `detection` | "Can each declared safeguard **fire**, and who notices its **silent death**?" | FMEA-detection × STAMP control-loop audit. |
+
+A grid of historically frequent failure classes (built-never-wired,
+guard-that-does-not-guard, test-theatre, silent-failopen, …) is injected as an
+**additive** search aid — it extends the reviewers' search, it never limits it.
+Output is aggregated by deduped, severity-ranked **findings** (a design review
+has no binary claim to hold or fail), with cross-lens corroboration recorded.
+
+On a first live run against a 5.7k-line retrieval core, the three no-claim
+reviewers surfaced 10 genuinely new defects at 0 false positives — including a
+lock omission on the exact path a claim-fed review had just voted 3-0 clean.
+
+### Deterministic audit (`audit_detectors.py`)
+
+Some failure classes are bookkeeping, not judgment, and an LLM only adds
+confabulation risk. Two grep-based detectors (no model, no network) feed the
+design grid:
+
+- **dead env flags** — capability gated behind an env flag defaulting OFF that
+  no config, doc, script, or assignment ever sets (the built-never-wired class).
+- **deviation register** — declared limitations (`KNOWN LIMIT`, `for now`,
+  `FIXME`) collected *with their git-blame age*, so an old unrevisited deroga
+  becomes a queue item instead of wallpaper. No silent caps: truncation is
+  reported.
+
+Run standalone: `python -m critic_orchestrator.audit_detectors <repo> --no-age`.
+
+---
+
 ## Works with any coding agent
 
 The tool is an **MCP server**, so any MCP-capable coding agent can call it

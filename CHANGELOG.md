@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased — Design review: the no-claim gate + deterministic audit
+
+### Added
+- `design_workers.py` + MCP tool `start_design_review` — adversarial review of
+  **modules or a design doc, before/without a fix**, that accepts **no claim and
+  no diff** (enforced by the tool schema and pinned by a signature test). Three
+  read-only reviewers infer the module's purpose from the artifact and review it
+  through independent lenses: `premortem` (Klein prospective hindsight with an
+  honest empty-handed exit), `perimeter` (category errors / is-this-the-right-
+  problem, frame attack allowed), `detection` (FMEA × STAMP: can each safeguard
+  fire, who notices its silent death).
+  - **Why it exists:** the post-fix reviewers take the proposer's claim, and the
+    claim defines the review perimeter — measured as four consecutive 3-0
+    `claim_holds` votes on changes mutation testing later showed to contain five
+    theatre-tests. Removing the claim is the structural cure; a harsher prompt is
+    not (that was v0.2.0, empirically 100% false positives).
+  - A historical failure-class grid is injected as an **additive** search aid
+    ("EXTEND your search; never limit it" — contractual, pinned by test).
+  - Aggregation by deduped, severity-ranked **findings** (`DesignReport`,
+    duck-typed into the existing async job registry via a `ReviewReport`
+    Protocol); cross-lens dedupe on file+line with corroboration and
+    `also_reported_as` recorded, plus `findings_per_file` so one root cause
+    reported by three lenses does not read as three problems.
+- `audit_detectors.py` (+ `python -m critic_orchestrator.audit_detectors`) — two
+  deterministic, LLM-free detectors that feed the grid: **dead env flags**
+  (built-never-wired: falsy-default flag nothing sets — `or`-fallback and
+  documented/config/test tiers handled) and a **deviation register** (declared
+  limitations with git-blame age; no silent caps — truncation is reported).
+
+### Validation
+- First live run (3 no-claim reviewers × Opus on a 5.7k-line retrieval core):
+  10 new true defects at 0 false positives, including a lock omission on the
+  exact path a claim-fed review had voted 3-0 clean. A controlled arm with the
+  proposer's (true) claim injected concentrated 3/3 findings inside the claim's
+  subject — reproducing the capture mechanism the no-claim contract removes.
+  Experiment harness: `experiments/exp_design_review.py`.
+- Suite: 128 passed (was 111; +17 design/audit tests, one added from a false
+  positive found on the first live audit run).
+- pyproject version intentionally NOT bumped: committed, not released —
+  features accumulate to one tag.
+
 ## 0.5.0 — 2026-07-02 — Ghost-CLI backend: full triad without `claude --print`
 
 ### Added

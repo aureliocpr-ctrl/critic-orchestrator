@@ -456,11 +456,15 @@ class DesignReport:
     wall_duration_ms: int
 
     def as_dict(self) -> dict[str, Any]:
+        per_file: dict[str, int] = {}
+        for f in self.findings:
+            per_file[f["file"]] = per_file.get(f["file"], 0) + 1
         return {
             "kind": "design_review",
             "target": self.target,
             "status": self.status,
             "by_severity": dict(self.by_severity),
+            "findings_per_file": per_file,
             "findings": list(self.findings),
             "workers": [
                 {
@@ -503,10 +507,26 @@ def _normalize_finding(raw: Any, worker: str) -> dict[str, Any] | None:
         "evidence": str(raw.get("evidence", "")),
         "worker": worker,
         "corroborated_by": [],
+        "also_reported_as": [],
     }
     if isinstance(raw.get("line"), int):
         out["line"] = raw["line"]
     return out
+
+
+def _merge_key(f: dict[str, Any]) -> tuple[str, str, Any]:
+    """Identity of a finding for cross-lens dedupe.
+
+    file+line when an anchor line exists — an EXACT signal: on the first
+    live run three lenses reported one defect (semantic.py:2139) under
+    three different titles and title-dedupe kept all three. Title-based
+    fallback only when no line was given. Deliberately no fuzzy
+    similarity: near-duplicates on different lines are corroboration to
+    keep, and `findings_per_file` surfaces their concentration.
+    """
+    if isinstance(f.get("line"), int):
+        return (f["file"], "L", f["line"])
+    return (f["file"], "T", f["title"].lower())
 
 
 def aggregate_design_report(
@@ -533,9 +553,19 @@ def aggregate_design_report(
             norm = _normalize_finding(raw, w.name)
             if norm is None:
                 continue
-            key = (norm["file"], norm["title"].lower())
+            key = _merge_key(norm)
             if key in merged:
-                merged[key]["corroborated_by"].append(w.name)
+                kept = merged[key]
+                if w.name != kept["worker"] and \
+                        w.name not in kept["corroborated_by"]:
+                    kept["corroborated_by"].append(w.name)
+                if norm["title"].lower() != kept["title"].lower() and \
+                        norm["title"] not in kept["also_reported_as"]:
+                    kept["also_reported_as"].append(norm["title"])
+                # The merged finding keeps the most severe assessment.
+                sev_rank = {s: i for i, s in enumerate(_SEVERITIES)}
+                if sev_rank[norm["severity"]] < sev_rank[kept["severity"]]:
+                    kept["severity"] = norm["severity"]
             else:
                 merged[key] = norm
                 order.append(key)

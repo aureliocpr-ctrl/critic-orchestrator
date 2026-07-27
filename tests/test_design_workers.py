@@ -201,6 +201,57 @@ def test_aggregate_dedupes_identical_file_title() -> None:
     assert rep.findings[0]["corroborated_by"] == ["detection"]
 
 
+def test_aggregate_dedupes_same_file_and_line_across_lenses() -> None:
+    """Measured on the first live run: three independent arms reported
+    the SAME defect at semantic.py:2139 under three different titles, and
+    exact-title dedupe left three entries. file+line is an EXACT signal
+    (no similarity threshold), so it merges them — while keeping the
+    other wordings visible rather than discarding them."""
+    a = _finding("cold_overrun mutates state without the lock", "medium")
+    a["line"] = 2139
+    b = _finding("cold-overrun path skips the breaker lock", "low")
+    b["line"] = 2139
+    rep = aggregate_design_report(_report([
+        _verdict("detection", [a]),
+        _verdict("premortem", [b]),
+    ]), target="m.py")
+    assert len(rep.findings) == 1
+    assert rep.findings[0]["corroborated_by"] == ["premortem"]
+    assert rep.findings[0]["also_reported_as"] == [
+        "cold-overrun path skips the breaker lock",
+    ]
+    # The surviving entry keeps the HIGHER severity of the merged pair.
+    assert rep.findings[0]["severity"] == "medium"
+    assert rep.by_severity["medium"] == 1
+    assert rep.by_severity["low"] == 0
+
+
+def test_aggregate_keeps_distinct_lines_in_same_file_separate() -> None:
+    """Same file, different anchors → two findings. Guards against the
+    merge becoming a file-level collapse."""
+    a = _finding("no floor in the cache path", "high")
+    a["line"] = 3612
+    b = _finding("no floor in the legacy path", "medium")
+    b["line"] = 3869
+    rep = aggregate_design_report(_report([
+        _verdict("premortem", [a]), _verdict("perimeter", [b]),
+    ]), target="m.py")
+    assert len(rep.findings) == 2
+
+
+def test_aggregate_findings_per_file_is_reported() -> None:
+    """Near-duplicates across lenses that cite different lines survive by
+    design; the report surfaces the concentration so a reader is not
+    misled into counting one root cause as N independent problems."""
+    a = _finding("x", "high"); a["line"] = 10
+    b = _finding("y", "high"); b["line"] = 20
+    c = _finding("z", "high", file="other.py"); c["line"] = 5
+    rep = aggregate_design_report(_report([
+        _verdict("premortem", [a, b, c]),
+    ]), target="m.py")
+    assert rep.as_dict()["findings_per_file"] == {"m.py": 2, "other.py": 1}
+
+
 def test_aggregate_tolerates_malformed_findings() -> None:
     """A worker that emits garbage findings must not crash aggregation."""
     bad = WorkerVerdict(
