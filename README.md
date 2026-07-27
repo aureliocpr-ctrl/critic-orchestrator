@@ -87,6 +87,29 @@ predicted direction but **not statistically significant** at n=1 per arm
 family as the proposer: this measures the *input contract*, not model
 independence.
 
+### Backends: design review needs an *agentic* one
+
+All three design lenses read files (`Read`/`Grep`/`Glob`), so they carry
+`requires_execution=True`. Consequence, stated plainly because it is easy to
+miss: on a **reasoning-only** API backend (`openai_compat`, `anthropic_api`) a
+design review runs **zero of three** reviewers — they are honestly reported as
+`skipped: requires an agentic backend` and the report comes back `undecided`,
+never fabricated. That is stricter than the post-fix triad, where the
+`counterexample` reviewer still runs on any provider (1 of 3).
+
+| Backend | post-fix triad | design review |
+|---|---|---|
+| `claude_cli` / `ghost_cli` (subscription) | 3 of 3 | **3 of 3** |
+| `openai_compat` (Kimi, GLM, DeepSeek, OpenAI, …) | 1 of 3 | **0 of 3** |
+| `anthropic_api` | 1 of 3 | **0 of 3** |
+
+To run the design lenses on a non-Claude model you need an *agentic* CLI for it.
+One is available locally: `veri run --approve plan --json -m kimi-k3` exposes
+`fs_read / fs_list / fs_glob / fs_grep` under a read-only policy — the exact tool
+set the lenses need. A `veri_cli` backend is therefore a small, well-defined
+addition; it is **not built yet**, and until it is, model-independent design
+review is unmeasured.
+
 ### Deterministic audit (`audit_detectors.py`)
 
 Some failure classes are bookkeeping, not judgment, and an LLM only adds
