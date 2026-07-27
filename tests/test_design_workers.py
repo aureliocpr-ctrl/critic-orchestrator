@@ -244,9 +244,12 @@ def test_aggregate_findings_per_file_is_reported() -> None:
     """Near-duplicates across lenses that cite different lines survive by
     design; the report surfaces the concentration so a reader is not
     misled into counting one root cause as N independent problems."""
-    a = _finding("x", "high"); a["line"] = 10
-    b = _finding("y", "high"); b["line"] = 20
-    c = _finding("z", "high", file="other.py"); c["line"] = 5
+    a = _finding("x", "high")
+    a["line"] = 10
+    b = _finding("y", "high")
+    b["line"] = 20
+    c = _finding("z", "high", file="other.py")
+    c["line"] = 5
     rep = aggregate_design_report(_report([
         _verdict("premortem", [a, b, c]),
     ]), target="m.py")

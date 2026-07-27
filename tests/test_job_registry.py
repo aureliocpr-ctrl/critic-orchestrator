@@ -16,7 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from critic_orchestrator.job_registry import JOB_TTL_S, Job, JobRegistry
+from critic_orchestrator.job_registry import JOB_TTL_S, JobRegistry
+from critic_orchestrator.orchestrator import CriticReport, WorkerSpec
 
 
 class _FakeReport:
@@ -65,7 +66,6 @@ def test_every_terminal_transition_sweeps_expired_jobs(
     assert old.id not in reg._jobs, (
         f"mark_{transition} did not sweep an expired job"
     )
-from critic_orchestrator.orchestrator import CriticReport, WorkerSpec
 
 
 def _spec(name: str = "w") -> WorkerSpec:

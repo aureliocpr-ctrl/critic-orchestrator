@@ -189,7 +189,7 @@ def main() -> None:
     results: list[dict] = []
     out_path = Path(__file__).parent / "results_variance_bias.json"
 
-    print(f"Ground truth: claim_holds=True (feature really exists in repo)")
+    print("Ground truth: claim_holds=True (feature really exists in repo)")
     print(f"Project: {PROJECT_DIR}")
     print(f"Output: {out_path}")
     print()
