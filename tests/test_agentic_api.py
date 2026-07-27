@@ -422,6 +422,114 @@ def test_read_budget_stops_a_runaway_reader(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Endpoint construction — providers do not agree on the version segment
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("base,expected", [
+    # Already versioned: append the path, never a second version segment.
+    ("https://api.deepseek.com/v1",
+     "https://api.deepseek.com/v1/chat/completions"),
+    # GLM lives under /api/paas/v4. Appending /v1 produced
+    # /v4/v1/chat/completions and a live 404 — found by the smoke run,
+    # invisible to every mocked test because they all used /v1 bases.
+    ("https://api.z.ai/api/paas/v4",
+     "https://api.z.ai/api/paas/v4/chat/completions"),
+    ("https://open.bigmodel.cn/api/paas/v4",
+     "https://open.bigmodel.cn/api/paas/v4/chat/completions"),
+    ("https://example.com/openai/v2",
+     "https://example.com/openai/v2/chat/completions"),
+    # Unversioned: assume the OpenAI convention.
+    ("https://api.example.com",
+     "https://api.example.com/v1/chat/completions"),
+    # Trailing slash must not double up.
+    ("https://api.deepseek.com/v1/",
+     "https://api.deepseek.com/v1/chat/completions"),
+    # A fully-specified endpoint is respected verbatim.
+    ("https://gw.internal/route/chat/completions",
+     "https://gw.internal/route/chat/completions"),
+    # Local servers (Ollama-style) keep their own prefix.
+    ("http://localhost:11434/v1",
+     "http://localhost:11434/v1/chat/completions"),
+])
+def test_endpoint_respects_the_provider_version_segment(
+    base: str, expected: str,
+) -> None:
+    assert _backend(base_url=base)._endpoint() == expected
+
+
+# ---------------------------------------------------------------------------
+# Capabilities — a reviewer must never conclude what it could not observe
+# ---------------------------------------------------------------------------
+
+def test_worker_needing_exec_is_skipped_not_answered(tmp_path: Path) -> None:
+    """The `falsification` reviewer's whole method is `git stash` + run the
+    test + restore + run again. This sandbox is READ-ONLY: there is no
+    Bash. Left to run, the model would read the test, *reason* about
+    whether it would fail pre-fix, and submit `test_falsifies_master:
+    true` having executed nothing — a verdict with no observation behind
+    it, which is precisely the confabulation this whole tool exists to
+    prevent. So it must be refused BEFORE any request is issued."""
+    from critic_orchestrator.default_workers import build_default_workers
+
+    falsification = build_default_workers(
+        claim="c", diff_summary="d", test_path="tests/test_x.py::test_y",
+        fixed_function=None,
+    )[0]
+    assert falsification.name == "falsification"
+
+    scripted = _Scripted([])  # any request at all is a failure
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend().run_worker(falsification, tmp_path, 60)
+    assert scripted.requests == []
+    assert res.verdict is None
+    assert "exec" in (res.error or "").lower()
+    assert "skip" in (res.error or "").lower()
+
+
+def test_read_only_workers_run_on_the_agentic_backend(tmp_path: Path) -> None:
+    """caller_verification needs only grep, and the design lenses only
+    read — those must run, which is the point of this backend."""
+    from critic_orchestrator.default_workers import build_default_workers
+    from critic_orchestrator.design_workers import build_design_workers
+
+    caller = build_default_workers(
+        claim="c", diff_summary="d", test_path=None,
+        fixed_function="my_func",
+    )[0]
+    assert caller.name == "caller_verification"
+    lens = build_design_workers(module_paths=["m.py"])[0]
+
+    for spec in (caller, lens):
+        scripted = _Scripted([
+            _assistant_tool_call(
+                "submit_verdict",
+                {k: (True if k.endswith("holds") or k.endswith("exists")
+                     else ("x" if k != "caller_paths" and k != "findings"
+                           and k != "confidence" else
+                           (0.5 if k == "confidence" else [])))
+                 for k in (spec.schema.get("required") or [])},
+            ),
+        ])
+        with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+                   scripted):
+            res = _backend().run_worker(spec, tmp_path, 60)
+        assert res.error is None, f"{spec.name}: {res.error}"
+        assert res.verdict is not None
+
+
+def test_needs_defaults_to_read_for_a_bare_spec() -> None:
+    """Backwards compatible: a WorkerSpec built without `needs` declares
+    read, so third-party specs keep working on this backend."""
+    spec = WorkerSpec(name="x", prompt="p", schema=_SCHEMA)
+    assert spec.needs == frozenset({"read"})
+
+
+def test_backend_declares_its_capabilities() -> None:
+    assert _backend().capabilities == frozenset({"read"})
+
+
+# ---------------------------------------------------------------------------
 # Cancellation — found live by an independent model (DeepSeek) reviewing
 # this repo through the agentic backend, severity critical.
 # ---------------------------------------------------------------------------

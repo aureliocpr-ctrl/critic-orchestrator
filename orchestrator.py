@@ -95,6 +95,18 @@ class WorkerSpec:
     # caller_verification (grep call sites). A reasoning-only backend
     # reports such a worker as "skipped" instead of fabricating a verdict.
     requires_execution: bool = False
+    # WHICH capabilities the worker needs, as a set of coarse verbs:
+    #   "read" — inspect repository files (Read/Grep/Glob, fs_* tools)
+    #   "exec" — run commands that mutate or execute (git stash, pytest)
+    # `requires_execution` alone was too coarse once a read-only agentic
+    # backend existed: it cannot distinguish `caller_verification` (grep
+    # is enough) from `falsification` (whose entire method is stash + run
+    # the test). Left undistinguished, a read-only backend would let the
+    # falsification reviewer REASON about whether the test fails pre-fix
+    # and answer as if it had observed it — a conclusion with no
+    # observation behind it. A backend must refuse any worker whose needs
+    # exceed what it can offer.
+    needs: frozenset[str] = frozenset({"read"})
 
 
 @dataclass

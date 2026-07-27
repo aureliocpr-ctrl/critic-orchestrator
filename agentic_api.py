@@ -73,6 +73,10 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 })
 
 
+#: A trailing API version segment, e.g. `/v1`, `/v4` (GLM: `/api/paas/v4`).
+_VERSION_SEGMENT_RE = re.compile(r"/v\d+$")
+
+
 class _SandboxError(Exception):
     """A path the model asked for lies outside the project directory."""
 
@@ -362,11 +366,26 @@ class AgenticApiBackend:
     read_budget_bytes: int = DEFAULT_READ_BUDGET_BYTES
     temperature: float | None = None
 
+    #: What this backend can actually offer a reviewer. READ-ONLY by
+    #: design: the sandbox exposes inspection tools and nothing that
+    #: mutates or executes. A worker whose `needs` exceed this is skipped,
+    #: never answered — see the check at the top of run_worker.
+    capabilities: frozenset[str] = frozenset({"read"})
+
     def _endpoint(self) -> str:
+        """Build the chat-completions URL without inventing a path.
+
+        Providers do NOT agree on the version segment: DeepSeek and
+        Moonshot use `/v1`, GLM lives under `/api/paas/v4`. Unconditionally
+        appending `/v1` produced `/api/paas/v4/v1/chat/completions` and a
+        live 404 — a blind spot every mocked test shared, because they all
+        used `/v1` bases. So: respect a version segment that is already
+        there, and assume the OpenAI convention only when none is.
+        """
         base = self.base_url.rstrip("/")
         if base.endswith("/chat/completions"):
             return base
-        if not base.endswith("/v1") and "/v1/" not in base:
+        if not _VERSION_SEGMENT_RE.search(base):
             base += "/v1"
         return base + "/chat/completions"
 
@@ -395,6 +414,20 @@ class AgenticApiBackend:
         in flight — the critical defect an independent model found in this
         repository's own cancellation path.
         """
+        missing = frozenset(getattr(spec, "needs", frozenset({"read"}))) \
+            - self.capabilities
+        if missing:
+            return BackendResult(
+                verdict=None,
+                error=(
+                    f"skipped: worker {spec.name!r} needs "
+                    f"{sorted(missing)} and this backend offers only "
+                    f"{sorted(self.capabilities)} (read-only sandbox: no "
+                    "command execution). A verdict reasoned instead of "
+                    "observed would be a confabulation, so none is "
+                    "produced."
+                ),
+            )
         root = Path(project_dir)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": _SYSTEM},

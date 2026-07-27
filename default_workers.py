@@ -272,6 +272,10 @@ be ONLY the JSON object; no surrounding prose.
         extra_args=("--allowedTools", "Read Grep Glob Bash"),
         permission_mode="acceptEdits",
         requires_execution=True,
+        # `git stash` + pytest: this reviewer's verdict is only worth
+        # anything if it actually ran the test, so a backend that cannot
+        # execute must skip it rather than let it reason to a conclusion.
+        needs=frozenset({"read", "exec"}),
     )
 
 

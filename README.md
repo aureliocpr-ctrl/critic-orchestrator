@@ -97,16 +97,26 @@ design review runs **zero of three** reviewers — they are honestly reported as
 never fabricated. That is stricter than the post-fix triad, where the
 `counterexample` reviewer still runs on any provider (1 of 3).
 
-| Backend | post-fix triad | design review |
-|---|---|---|
-| `claude_cli` / `ghost_cli` (subscription) | 3 of 3 | **3 of 3** |
-| `openai_compat` (Kimi, GLM, DeepSeek, OpenAI, …) | 1 of 3 | **0 of 3** |
-| `anthropic_api` | 1 of 3 | **0 of 3** |
+| Backend | offers | post-fix triad | design review |
+|---|---|---|---|
+| `claude_cli` / `ghost_cli` (subscription) | read + exec | 3 of 3 | **3 of 3** |
+| **`agentic_api`** (Kimi, GLM, DeepSeek, …) | read | **2 of 3** | **3 of 3** |
+| `openai_compat` / `anthropic_api` | — | 1 of 3 | 0 of 3 |
 
-The gap is closed by `agentic_api` (see below): the same OpenAI-compatible
-endpoints, driven as a real agent loop with read-only filesystem tools, so the
-design lenses run on Kimi, GLM, DeepSeek and friends without a coding-agent CLI
-in the middle.
+`agentic_api` drives those same OpenAI-compatible endpoints as a real agent loop
+with read-only filesystem tools, so the design lenses run on any provider with
+tool calling — no coding-agent CLI in the middle, no extra dependency.
+
+**Why 2 of 3 and not 3.** Each reviewer declares what it *needs*
+(`WorkerSpec.needs`) and each backend declares what it *offers*
+(`capabilities`); a reviewer whose needs exceed the offer is skipped, never
+answered. `caller_verification` needs `read` (grep is its whole method) and
+runs. `falsification` needs `exec` — its method *is* `git stash` + run the test
++ restore + run again — so a read-only sandbox refuses it. That refusal is the
+point: left to run, the model would read the test, *reason* about whether it
+would fail pre-fix, and answer `test_falsifies_master: true` having executed
+nothing. A conclusion with no observation behind it is exactly the
+confabulation this tool exists to catch, so no verdict is better than that one.
 
 ### Deterministic audit (`audit_detectors.py`)
 

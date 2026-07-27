@@ -32,8 +32,7 @@ PROVIDERS: list[tuple[str, str, str, str]] = [
     ("deepseek", "DEEPSEEK_API_KEY", "https://api.deepseek.com/v1",
      "deepseek-chat"),
     ("kimi", "MOONSHOT_API_KEY", "MOONSHOT_BASE_URL", "kimi-k3"),
-    ("glm", "ZHIPU_API_KEY", "https://open.bigmodel.cn/api/paas/v4",
-     "glm-4-plus"),
+    ("glm", "ZAI_API_KEY", "https://api.z.ai/api/paas/v4", "glm-4.6"),
 ]
 
 
