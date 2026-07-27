@@ -536,6 +536,32 @@ def _format_probe(probe: "_pinned.FalsificationProbe") -> str:
         status = "TIMED OUT" if res.timed_out else f"exit {res.exit_code}"
         return f"--- {label}: {status} in {res.duration_s}s ---\n{combined}"
 
+    # The one distinction that is deterministic rather than interpretive:
+    # pytest exits 1 when tests RAN and failed, but 2/3/4/5 when it never
+    # got that far. The baseline gets the test file with no import
+    # analysis, so a helper or conftest introduced by the fix commit
+    # errors there — and a bare non-zero exit reads exactly like the
+    # failure we are looking for. Saying so beats hoping the model spots
+    # it in the traceback.
+    warning = ""
+    if not probe.pre_ran_the_test:
+        warning = (
+            "\n\n!! THE BASELINE RUN DID NOT RUN THE TEST. Its exit code "
+            f"({probe.pre.exit_code}) is a pytest collection/usage/"
+            "internal error, not a test failure — most often because the "
+            "test needs a helper, fixture or conftest that only exists at "
+            "HEAD. A non-zero exit here is NOT evidence that the test "
+            "falsifies anything. Report test_falsifies_master=false with "
+            "low confidence and say the experiment was inconclusive, or "
+            "ask for a baseline_ref where the test can be collected."
+        )
+    elif not probe.post_ran_the_test:
+        warning = (
+            "\n\n!! THE HEAD RUN DID NOT RUN THE TEST either (exit "
+            f"{probe.post.exit_code}): the environment cannot execute "
+            "this selector at all, so neither half of the experiment "
+            "carries information."
+        )
     return (
         f"selector: {probe.selector}\n"
         f"HEAD (fix present):    {probe.head[:12]}\n"
@@ -544,6 +570,7 @@ def _format_probe(probe: "_pinned.FalsificationProbe") -> str:
         + half("run at HEAD — expected PASS", probe.post)
         + "\n\n"
         + half("run at BASELINE — expected FAIL", probe.pre)
+        + warning
     )
 
 

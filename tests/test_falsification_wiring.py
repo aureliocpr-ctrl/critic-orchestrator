@@ -493,3 +493,61 @@ def test_exec_tool_schema_takes_no_arguments() -> None:
     assert exec_tools, "exec tool not in schema when a selector is granted"
     params = exec_tools[0]["function"]["parameters"]
     assert params.get("properties") in ({}, None)
+
+
+# ---------------------------------------------------------------------------
+# The load-bearing assumption, made VISIBLE. Flagged high by the design
+# review: the test file is carried to the baseline with no import analysis,
+# so a test whose helper/conftest/fixture only exists at HEAD errors at the
+# baseline instead of failing — and a bare "exit != 0" reads that as
+# falsification evidence. pytest already distinguishes the two in its exit
+# code; the probe was throwing that signal away.
+# ---------------------------------------------------------------------------
+
+def test_probe_flags_a_baseline_that_never_RAN_the_test(
+        tmp_path: Path) -> None:
+    """The test imports a helper introduced by the fix commit: at the
+    baseline it cannot even be collected. That is NOT evidence the test
+    falsifies anything."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "mod.py").write_text("def add(a, b):\n    return a - b\n")
+    _git("init", "-q", cwd=root)
+    _commit("bug", cwd=root)
+    (root / "mod.py").write_text("def add(a, b):\n    return a + b\n")
+    (root / "helper.py").write_text("EXPECTED = 5\n")   # new at HEAD
+    (root / "test_mod.py").write_text(
+        "from helper import EXPECTED\nfrom mod import add\n\n\n"
+        "def test_add():\n    assert add(2, 3) == EXPECTED\n")
+    _commit("fix + test + helper", cwd=root)
+
+    probe = run_falsification_probe(root, "test_mod.py::test_add",
+                                    timeout_s=180)
+    assert probe.post.exit_code == 0, probe.post.stdout
+    assert probe.pre.exit_code != 0            # looks like a failure…
+    assert probe.pre_ran_the_test is False, (  # …but the test never ran
+        "a collection error was indistinguishable from a real failure")
+
+
+def test_probe_confirms_a_baseline_that_really_ran_and_failed(
+        fixed_repo: Path) -> None:
+    probe = run_falsification_probe(fixed_repo, "test_mod.py::test_add",
+                                    timeout_s=180)
+    assert probe.pre.exit_code == 1
+    assert probe.pre_ran_the_test is True
+
+
+def test_the_warning_reaches_the_model(fixed_repo: Path) -> None:
+    """A signal the reviewer never sees is not a safeguard."""
+    from critic_orchestrator.agentic_api import _format_probe
+    from critic_orchestrator.pinned_exec import FalsificationProbe
+    ok = PinnedResult(exit_code=0, stdout="1 passed", stderr="",
+                      timed_out=False, duration_s=0.1)
+    collect_err = PinnedResult(exit_code=4, stdout="ERROR collecting",
+                               stderr="", timed_out=False, duration_s=0.1)
+    text = _format_probe(FalsificationProbe(
+        post=ok, pre=collect_err, head="a" * 12, baseline="b" * 12,
+        selector="t.py::x", test_file="t.py"))
+    assert "did not run the test" in text.lower()
+    assert "not evidence" in text.lower()
+    assert "test_falsifies_master=false" in text.lower()

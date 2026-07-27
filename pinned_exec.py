@@ -275,13 +275,25 @@ def worktree_pythonpath_env(wt: Path) -> dict[str, str]:
     return {"PYTHONPATH": os.pathsep.join(parts)}
 
 
+#: pytest exit codes. 0 = all passed, 1 = tests ran and some FAILED.
+#: 2 (interrupted), 3 (internal error), 4 (usage error) and 5 (no tests
+#: collected) all mean the test never actually ran — a distinction the
+#: probe threw away until a design review rated it high: the test file is
+#: carried to the baseline with no import analysis, so a helper, fixture
+#: or conftest introduced by the fix commit makes the baseline ERROR, and
+#: a bare "exit != 0" reads that as falsification evidence.
+_PYTEST_TESTS_RAN: frozenset[int] = frozenset({0, 1})
+
+
 @dataclass
 class FalsificationProbe:
     """Both halves of the falsification experiment, as observed facts.
 
-    No verdict field on purpose: whether `pre` failing FOR THE RIGHT
+    No verdict field on purpose: whether `pre` failed FOR THE RIGHT
     REASON (the pinned assertion, not an ImportError) is what a model is
-    for. This object only reports what happened.
+    for. This object only reports what happened — plus the one
+    distinction that is deterministic rather than interpretive, see
+    `pre_ran_the_test`.
     """
 
     #: The test run at HEAD (fix present). Expected to pass.
@@ -293,6 +305,22 @@ class FalsificationProbe:
     baseline: str
     selector: str
     test_file: str
+
+    @property
+    def pre_ran_the_test(self) -> bool:
+        """True iff the baseline run actually executed the test.
+
+        False means collection/usage/internal error: the outcome carries
+        NO information about whether the test falsifies the bug, however
+        much its non-zero exit code looks like a failure.
+        """
+        return (not self.pre.timed_out
+                and self.pre.exit_code in _PYTEST_TESTS_RAN)
+
+    @property
+    def post_ran_the_test(self) -> bool:
+        return (not self.post.timed_out
+                and self.post.exit_code in _PYTEST_TESTS_RAN)
 
 
 def run_falsification_probe(

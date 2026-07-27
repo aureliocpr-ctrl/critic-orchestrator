@@ -56,6 +56,11 @@ class ExecPolicy:
 
     enabled: bool = False
     roots: list[Path] = field(default_factory=list)
+    #: Entries of CRITIC_EXEC_ROOTS that are not existing directories.
+    #: Kept rather than discarded: a typo'd root silently narrows the
+    #: policy, and the operator then reads "outside every configured
+    #: execution root" about a path they believe they configured.
+    invalid_roots: list[str] = field(default_factory=list)
 
     def check(self, project_dir: Path | str) -> Path:
         """Return the resolved directory, or raise with a reason.
@@ -73,11 +78,20 @@ class ExecPolicy:
                 "running anything."
             )
         if not self.roots:
+            extra = ""
+            if self.invalid_roots:
+                extra = (
+                    f" NOTE: {len(self.invalid_roots)} entr"
+                    f"{'y was' if len(self.invalid_roots) == 1 else 'ies were'}"
+                    f" dropped because they are not existing directories: "
+                    f"{', '.join(repr(r) for r in self.invalid_roots)} — "
+                    "check for a typo or a path that does not exist yet."
+                )
             raise ExecPolicyError(
                 f"{_ENV_ENABLE} is set but no execution root is configured. "
                 f"Set {_ENV_ROOTS} to the repositories where execution is "
                 "allowed — an empty list means nowhere, deliberately, "
-                "because the alternative is everywhere."
+                "because the alternative is everywhere." + extra
             )
         target = Path(project_dir).resolve()
         inside = False
@@ -95,10 +109,20 @@ class ExecPolicy:
             inside = True
             break
         if not inside:
+            extra = ""
+            if self.invalid_roots:
+                extra = (
+                    f" Also dropped as non-existent director"
+                    f"{'y' if len(self.invalid_roots) == 1 else 'ies'}: "
+                    f"{', '.join(repr(r) for r in self.invalid_roots)} — if "
+                    "the intended root is among these, the policy is "
+                    "narrower than configured."
+                )
             raise ExecPolicyError(
                 f"{target} is outside every configured execution root "
                 f"({', '.join(str(r) for r in self.roots)}). The caller does "
                 "not choose where this server executes; the operator does."
+                + extra
             )
         if not (target / ".git").exists():
             raise ExecPolicyError(
@@ -114,6 +138,7 @@ def policy_from_env() -> ExecPolicy:
     enabled = (os.environ.get(_ENV_ENABLE) or "").strip().lower() in _TRUTHY
     raw = (os.environ.get(_ENV_ROOTS) or "").strip()
     roots: list[Path] = []
+    invalid: list[str] = []
     if raw:
         for part in raw.split(os.pathsep):
             part = part.strip().strip('"').strip("'")
@@ -121,10 +146,15 @@ def policy_from_env() -> ExecPolicy:
                 continue
             p = Path(part)
             # A stale entry must not disable the valid ones — and must not
-            # widen the policy either, so it is simply dropped.
+            # widen the policy either, so it is dropped. It is REMEMBERED
+            # though: dropping it silently means a typo'd root narrows the
+            # policy and the operator later reads "outside every configured
+            # root" about a path they believe they configured.
             if p.is_dir():
                 roots.append(p)
-    return ExecPolicy(enabled=enabled, roots=roots)
+            else:
+                invalid.append(part)
+    return ExecPolicy(enabled=enabled, roots=roots, invalid_roots=invalid)
 
 
 __all__ = ["ExecPolicy", "ExecPolicyError", "policy_from_env"]

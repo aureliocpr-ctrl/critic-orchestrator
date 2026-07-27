@@ -193,3 +193,50 @@ def test_policy_reason_is_actionable() -> None:
         pol.check(Path("."))
     msg = str(exc.value)
     assert "CRITIC_ALLOW_EXEC" in msg and "CRITIC_EXEC_ROOTS" in msg
+
+
+# --------------------------------------------------------------------------
+# A dropped root must not be dropped SILENTLY (design review, medium): a
+# typo narrows the policy, and the operator then reads "outside every
+# configured execution root" about a path they believe they configured.
+# --------------------------------------------------------------------------
+
+def test_a_nonexistent_root_is_remembered_not_just_dropped(
+        tmp_path, monkeypatch) -> None:
+    from critic_orchestrator.exec_policy import policy_from_env
+    ghost = str(tmp_path / "typo_dir_that_does_not_exist")
+    monkeypatch.setenv("CRITIC_ALLOW_EXEC", "1")
+    monkeypatch.setenv("CRITIC_EXEC_ROOTS", ghost)
+    policy = policy_from_env()
+    assert policy.roots == []
+    assert ghost in policy.invalid_roots
+
+
+def test_the_refusal_names_the_dropped_entry(tmp_path, monkeypatch) -> None:
+    from critic_orchestrator.exec_policy import ExecPolicyError, policy_from_env
+    ghost = str(tmp_path / "nope")
+    monkeypatch.setenv("CRITIC_ALLOW_EXEC", "1")
+    monkeypatch.setenv("CRITIC_EXEC_ROOTS", ghost)
+    with pytest.raises(ExecPolicyError) as exc:
+        policy_from_env().check(tmp_path)
+    assert "nope" in str(exc.value)
+    assert "not existing directories" in str(exc.value) \
+        or "not an existing director" in str(exc.value) \
+        or "dropped" in str(exc.value)
+
+
+def test_a_valid_root_still_works_alongside_a_typo(
+        tmp_path, monkeypatch) -> None:
+    """A stale entry must never disable the valid ones."""
+    import os as _os
+    from critic_orchestrator.exec_policy import policy_from_env
+    good = tmp_path / "repo"
+    good.mkdir()
+    (good / ".git").mkdir()
+    ghost = str(tmp_path / "typo")
+    monkeypatch.setenv("CRITIC_ALLOW_EXEC", "1")
+    monkeypatch.setenv("CRITIC_EXEC_ROOTS",
+                       _os.pathsep.join([ghost, str(tmp_path)]))
+    policy = policy_from_env()
+    assert policy.check(good) == good.resolve()
+    assert ghost in policy.invalid_roots

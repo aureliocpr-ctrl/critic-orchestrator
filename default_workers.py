@@ -243,24 +243,38 @@ regression test really falsifies the bug it pretends to pin.
 {safe_test_path}
 </UNTRUSTED_INPUT>
 
-YOUR EXACT PROCEDURE:
-1. Use Bash to run `git stash` to remove the fix from working tree.
-2. Use Bash to run the test (test_path from the UNTRUSTED_INPUT block
-   above). Read the output.
-3. Use Bash to run `git stash pop` to restore the fix.
-4. Use Bash to run the test again. Read the output.
+THE EXPERIMENT you must observe (not reason about) is the same in every
+case: run the test WITH the fix present, and run it WITHOUT the fix,
+then compare. HOW you obtain it depends on the tools you actually have —
+use whichever of these applies, and never simulate the one you lack:
 
-CRITERIA:
-- If step 2 FAILS and step 4 PASSES, the test is a real falsification.
+  * If you have a NO-ARGUMENT TOOL for the experiment (typically named
+    run_falsification_experiment), call it. It performs exactly the
+    comparison above in disposable git worktrees and returns both
+    outputs. That tool is the whole of your execution budget: there is
+    no shell.
+  * If instead you have Bash, do it yourself: `git stash` to remove the
+    fix, run the test (test_path from the UNTRUSTED_INPUT block above),
+    `git stash pop` to restore it, run the test again.
+
+CRITERIA (identical either way — "pre-fix" means the run without the
+fix, "post-fix" the run with it):
+- Pre-fix FAILS and post-fix PASSES: the test is a real falsification.
   test_falsifies_master = true, claim_holds = true.
-- If step 2 PASSES (test already passed on master without the fix),
-  the test was a confirmation post-hoc, not a falsification.
+- Pre-fix PASSES (the test already passed without the fix): it was a
+  confirmation post-hoc, not a falsification.
   test_falsifies_master = false, claim_holds = false.
-- If step 2 errors out for unrelated reasons (import error, missing
-  dep) report low confidence and document.
+- Pre-fix errors out for an unrelated reason — an import error, a
+  missing dependency, a fixture or helper that only exists with the fix,
+  a pytest collection error — then the test never ran and the exit code
+  says nothing about falsification, however non-zero it looks. Report
+  test_falsifies_master = false, low confidence, and say the experiment
+  was inconclusive.
 
-You MAY use Read, Grep, Glob to inspect files. You MUST use Bash to
-run the test.
+You MAY use Read/Grep/Glob (or fs_read/fs_grep/fs_glob) to inspect
+files. You MUST base the verdict on an experiment you actually ran; if
+neither mechanism above is available to you, say so instead of
+concluding.
 
 Output JSON conforming to the schema. The last message you emit must
 be ONLY the JSON object; no surrounding prose.
