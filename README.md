@@ -109,12 +109,24 @@ Measured on real endpoints, one design lens over a small module:
 |---|---|---|
 | DeepSeek | `deepseek-chat` | pass, ~130 s |
 | GLM | `glm-4.6` | pass, ~186 s (needed the wind-down: it first spent every step reading) |
-| Kimi | `kimi-k3` | **3/3** with retries + `CRITIC_STREAM=1`; 2/3 before, the failure a 429 |
+| Kimi | `kimi-k3` | 2/3 before retries (the failure a 429), **3/3 with them** |
 
-Reasoning models are slow here (300-470 s for one lens) and their findings
-vary run to run — worth knowing before wiring one into a gate. For Kimi,
-set `CRITIC_STREAM=1`: a non-streaming request sits silent while the model
-thinks, which is what intermediaries reset.
+Reasoning models are slow here and their findings vary run to run — worth
+knowing before wiring one into a gate.
+
+**Retries, not streaming, are what fixed Kimi** — measured by changing one
+factor at a time, because the first run changed both and could not
+attribute the improvement:
+
+| Kimi k3, 3 runs each | result | wall time |
+|---|---|---|
+| retries + `CRITIC_STREAM=1` | 3/3 | 315 s · 353 s · 472 s |
+| retries, no streaming | 3/3 | 161 s · 502 s · **1112 s** |
+
+So streaming is not what makes it succeed; it compresses the tail (worst
+case 472 s vs 1112 s) and keeps the connection from sitting silent long
+enough for an intermediary to reset it. Recommended for reasoning models,
+not required.
 
 `agentic_api` drives those same OpenAI-compatible endpoints as a real agent loop
 with read-only filesystem tools, so the design lenses run on any provider with
