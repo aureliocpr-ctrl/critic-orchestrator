@@ -47,6 +47,7 @@ import fnmatch
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -83,6 +84,41 @@ _VERSION_SEGMENT_RE = re.compile(r"/v\d+[a-z]*\d*$", re.IGNORECASE)
 #: the worker is failed. Bounded so a model that cannot produce a valid
 #: verdict ends as an error instead of spinning.
 _MAX_VERDICT_CORRECTIONS: int = 2
+
+#: HTTP statuses worth retrying: the server is telling us to WAIT, not
+#: that the request is wrong. Measured need — Kimi k3 scored 2/3 on repeat
+#: and the failure was 429 "engine currently overloaded", which threw away
+#: a review that had already spent minutes of model time. A 4xx that is
+#: not 429 will not fix itself: retrying it wastes budget and hides the
+#: real cause (wrong model id, wrong endpoint).
+_RETRY_STATUSES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
+
+#: Base for the exponential backoff, in seconds: 2, 4, 8 …
+_BACKOFF_BASE_S: float = 2.0
+
+
+class _Transient(Exception):
+    """A failure worth retrying, with the wait the server asked for."""
+
+    def __init__(self, detail: str, retry_after: float | None = None) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(exc: urllib.error.HTTPError) -> float | None:
+    """Parse `Retry-After` when present. A server that says how long to
+    wait knows better than our backoff guess."""
+    try:
+        raw = exc.headers.get("Retry-After") if exc.headers else None
+    except Exception:  # pragma: no cover - exotic header objects
+        return None
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(str(raw).strip()))
+    except ValueError:
+        return None  # HTTP-date form: fall back to the backoff
 
 _JSON_TYPE_CHECKS: dict[str, type | tuple[type, ...]] = {
     "boolean": bool,
@@ -543,6 +579,10 @@ class AgenticApiBackend:
     #: providers, while streaming is what keeps a long reasoning request
     #: from sitting silent long enough for an intermediary to kill it.
     stream: bool = False
+    #: Retries for TRANSIENT failures (see _RETRY_STATUSES). 3 covers the
+    #: overloaded-engine window measured on Kimi without turning a real
+    #: outage into a long silent wait.
+    max_retries: int = 3
 
     def _endpoint(self) -> str:
         """Build the chat-completions URL without inventing a path.
@@ -581,10 +621,59 @@ class AgenticApiBackend:
             self._endpoint(), data=json.dumps(body).encode(),
             headers=headers, method="POST",
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if streaming:
-                return {"choices": [{"message": _assemble_stream(resp)}]}
-            return json.loads(resp.read().decode())
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if streaming:
+                    return {"choices": [{"message": _assemble_stream(resp)}]}
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            if exc.code in _RETRY_STATUSES:
+                detail = ""
+                try:
+                    detail = exc.read().decode()[:200]
+                except Exception:  # pragma: no cover - body consumed
+                    pass
+                raise _Transient(
+                    f"http {exc.code}: {exc.reason} {detail}".strip(),
+                    _retry_after_seconds(exc),
+                ) from exc
+            raise
+        except (ConnectionResetError, ConnectionAbortedError,
+                TimeoutError) as exc:
+            # The failure that started this investigation: a connection
+            # killed mid-thought. Transport-level and transient.
+            raise _Transient(f"{type(exc).__name__}: {exc}") from exc
+        except urllib.error.URLError as exc:
+            raise _Transient(f"transport: {exc.reason}") from exc
+
+    def _post_with_retries(
+        self, body: dict, timeout: int,
+        cancel_check: Any | None, trace: list[str], step: int,
+    ) -> dict:
+        """`_post`, retrying transient failures with exponential backoff.
+
+        A retry is safe: a chat-completions call mutates nothing on our
+        side. Cancellation is checked BEFORE every wait and every retry —
+        a cancelled review that sleeps through its backoff is still
+        burning wall-clock and would still issue the next request.
+        """
+        attempt = 0
+        while True:
+            try:
+                return self._post(body, timeout)
+            except _Transient as exc:
+                if attempt >= self.max_retries:
+                    raise
+                if cancel_check is not None and cancel_check():
+                    raise
+                wait = exc.retry_after
+                if wait is None:
+                    wait = _BACKOFF_BASE_S * (2 ** attempt)
+                attempt += 1
+                trace.append(
+                    f"step{step}:retry{attempt}({exc.detail[:40]})"
+                )
+                time.sleep(wait)
 
     def run_worker(
         self, spec: WorkerSpec, project_dir: Path, timeout: int,
@@ -669,22 +758,41 @@ class AgenticApiBackend:
                 trace.append(f"step{steps}:forced-submit_verdict")
             if self.temperature is not None:
                 body["temperature"] = self.temperature
+            def _ctx_trace() -> str:
+                return (f"step={steps} ctx_msgs={len(messages)} "
+                        f"ctx_bytes={_ctx_bytes(messages)} | "
+                        + " | ".join(trace))
+
             try:
-                payload = self._post(body, timeout)
+                payload = self._post_with_retries(
+                    body, timeout, cancel_check, trace, steps,
+                )
+            except _Transient as exc:
+                # Retries exhausted, or a cancel arrived during the backoff.
+                cancelled = cancel_check is not None and cancel_check()
+                reason = ("cancelled during retry backoff"
+                          if cancelled
+                          else f"{exc.detail} (retries exhausted)")
+                return BackendResult(verdict=None, error=reason,
+                                      raw_preview=_ctx_trace())
             except urllib.error.HTTPError as exc:
-                # Some providers reject tool_choice. Retry once, plain,
+                # Non-transient HTTP. One special case: some providers
+                # reject tool_choice, so a forced verdict retries plain
                 # rather than losing an otherwise-complete review.
                 if force_verdict and exc.code in (400, 422):
                     body.pop("tool_choice", None)
                     trace.append(f"step{steps}:tool_choice-unsupported")
                     try:
-                        payload = self._post(body, timeout)
-                    except (urllib.error.HTTPError, urllib.error.URLError,
-                            OSError, json.JSONDecodeError) as exc2:
+                        payload = self._post_with_retries(
+                            body, timeout, cancel_check, trace, steps,
+                        )
+                    except (_Transient, urllib.error.HTTPError,
+                            urllib.error.URLError, OSError,
+                            json.JSONDecodeError) as exc2:
                         return BackendResult(
                             verdict=None,
                             error=f"retry without tool_choice failed: {exc2}",
-                            raw_preview=" | ".join(trace),
+                            raw_preview=_ctx_trace(),
                         )
                 else:
                     detail = ""
@@ -695,30 +803,12 @@ class AgenticApiBackend:
                     return BackendResult(
                         verdict=None,
                         error=f"http {exc.code}: {exc.reason} {detail}".strip(),
-                        raw_preview=" | ".join(trace),
+                        raw_preview=_ctx_trace(),
                     )
-            except urllib.error.URLError as exc:
-                return BackendResult(
-                    verdict=None, error=f"transport: {exc.reason}",
-                    # The trace was missing on the transport paths, which is
-                    # exactly where it is needed: a mid-loop connection
-                    # reset is undiagnosable without knowing which step and
-                    # how much context it died on.
-                    raw_preview=(f"step={steps} ctx_msgs={len(messages)} "
-                                 f"ctx_bytes={_ctx_bytes(messages)} | "
-                                 + " | ".join(trace)),
-                )
-            except (TimeoutError, OSError) as exc:
+            except (OSError, json.JSONDecodeError) as exc:
                 return BackendResult(
                     verdict=None, error=f"{type(exc).__name__}: {exc}",
-                    raw_preview=(f"step={steps} ctx_msgs={len(messages)} "
-                                 f"ctx_bytes={_ctx_bytes(messages)} | "
-                                 + " | ".join(trace)),
-                )
-            except json.JSONDecodeError as exc:
-                return BackendResult(
-                    verdict=None, error=f"non-JSON response: {exc}",
-                    raw_preview=" | ".join(trace),
+                    raw_preview=_ctx_trace(),
                 )
 
             choices = payload.get("choices") or []

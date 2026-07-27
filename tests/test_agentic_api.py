@@ -500,19 +500,188 @@ def test_rejection_names_the_offending_field(tmp_path: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Transient failures — measured: Kimi k3 scored 2/3 on repeat, and the
+# failure was HTTP 429 "engine currently overloaded", not a code defect.
+# ---------------------------------------------------------------------------
+
+def test_429_is_retried_and_succeeds(tmp_path: Path) -> None:
+    """A rate-limited or overloaded engine is a WAIT, not a verdict. With
+    no retry, one 429 threw away a review that had already spent minutes
+    of model time."""
+    import urllib.error
+
+    attempts = {"n": 0}
+
+    def _fake(req: Any, timeout: float | None = None) -> _FakeResponse:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise urllib.error.HTTPError(
+                "u", 429, "Too Many Requests", {},  # type: ignore[arg-type]
+                None,  # type: ignore[arg-type]
+            )
+        return _FakeResponse(_assistant_tool_call(
+            "submit_verdict", {"claim_holds": True, "evidence": "e"}))
+
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               _fake), patch("critic_orchestrator.agentic_api.time.sleep"):
+        res = _backend_noinv().run_worker(_spec(), tmp_path, 60)
+    assert res.verdict is not None
+    assert attempts["n"] == 2
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_transient_statuses_are_retried(tmp_path: Path, status: int) -> None:
+    import urllib.error
+
+    attempts = {"n": 0}
+
+    def _fake(req: Any, timeout: float | None = None) -> _FakeResponse:
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise urllib.error.HTTPError(
+                "u", status, "transient", {},  # type: ignore[arg-type]
+                None,  # type: ignore[arg-type]
+            )
+        return _FakeResponse(_assistant_tool_call(
+            "submit_verdict", {"claim_holds": True, "evidence": "e"}))
+
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               _fake), patch("critic_orchestrator.agentic_api.time.sleep"):
+        res = _backend_noinv().run_worker(_spec(), tmp_path, 60)
+    assert res.verdict is not None, f"{status} was not retried"
+
+
+def test_client_errors_are_not_retried(tmp_path: Path) -> None:
+    """A 400/401/404 will not fix itself: retrying wastes time and money
+    and hides the real cause (a bad model id, a wrong endpoint)."""
+    import urllib.error
+
+    attempts = {"n": 0}
+
+    def _fake(req: Any, timeout: float | None = None) -> None:
+        attempts["n"] += 1
+        raise urllib.error.HTTPError(
+            "u", 404, "Not Found", {}, None,  # type: ignore[arg-type]
+        )
+
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               _fake), patch("critic_orchestrator.agentic_api.time.sleep"):
+        res = _backend_noinv().run_worker(_spec(), tmp_path, 60)
+    assert res.verdict is None
+    assert attempts["n"] == 1
+    assert "404" in (res.error or "")
+
+
+def test_connection_reset_is_retried(tmp_path: Path) -> None:
+    """The failure that started this: a silent connection killed
+    mid-thought. Transport-level, and transient."""
+    attempts = {"n": 0}
+
+    def _fake(req: Any, timeout: float | None = None) -> _FakeResponse:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ConnectionResetError(10054, "forcibly closed by the host")
+        return _FakeResponse(_assistant_tool_call(
+            "submit_verdict", {"claim_holds": True, "evidence": "e"}))
+
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               _fake), patch("critic_orchestrator.agentic_api.time.sleep"):
+        res = _backend_noinv().run_worker(_spec(), tmp_path, 60)
+    assert res.verdict is not None
+    assert attempts["n"] == 2
+
+
+def test_retry_budget_is_bounded_and_reported(tmp_path: Path) -> None:
+    import urllib.error
+
+    attempts = {"n": 0}
+
+    def _fake(req: Any, timeout: float | None = None) -> None:
+        attempts["n"] += 1
+        raise urllib.error.HTTPError(
+            "u", 503, "always down", {}, None,  # type: ignore[arg-type]
+        )
+
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               _fake), patch("critic_orchestrator.agentic_api.time.sleep"):
+        res = _backend_noinv(max_retries=2).run_worker(_spec(), tmp_path, 60)
+    assert res.verdict is None
+    assert attempts["n"] == 3  # first try + 2 retries
+    assert "503" in (res.error or "")
+    assert "retr" in (res.error or "").lower()
+
+
+def test_retry_after_header_is_honoured(tmp_path: Path) -> None:
+    """A server that says how long to wait is telling us something more
+    useful than our own backoff guess."""
+    import urllib.error
+
+    slept: list[float] = []
+    attempts = {"n": 0}
+
+    def _fake(req: Any, timeout: float | None = None) -> _FakeResponse:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise urllib.error.HTTPError(
+                "u", 429, "slow down", {"Retry-After": "7"},  # type: ignore[arg-type]
+                None,  # type: ignore[arg-type]
+            )
+        return _FakeResponse(_assistant_tool_call(
+            "submit_verdict", {"claim_holds": True, "evidence": "e"}))
+
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               _fake), patch("critic_orchestrator.agentic_api.time.sleep",
+                              slept.append):
+        _backend_noinv().run_worker(_spec(), tmp_path, 60)
+    assert 7 in slept, f"Retry-After ignored, slept {slept}"
+
+
+def test_cancellation_wins_over_a_retry_wait(tmp_path: Path) -> None:
+    """Backing off must not outlive a cancel: a cancelled review sleeping
+    through its retries is still burning wall-clock and will still issue
+    the next request."""
+    import urllib.error
+
+    aborted = {"v": False}
+    attempts = {"n": 0}
+
+    def _fake(req: Any, timeout: float | None = None) -> None:
+        attempts["n"] += 1
+        aborted["v"] = True          # cancel arrives during the first call
+        raise urllib.error.HTTPError(
+            "u", 503, "down", {}, None,  # type: ignore[arg-type]
+        )
+
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               _fake), patch("critic_orchestrator.agentic_api.time.sleep"):
+        res = _backend_noinv().run_worker(
+            _spec(), tmp_path, 60, cancel_check=lambda: aborted["v"])
+    assert res.verdict is None
+    assert attempts["n"] == 1, "retried after cancellation"
+    assert "cancel" in (res.error or "").lower()
+
+
 def test_http_error_is_captured(tmp_path: Path) -> None:
+    """A non-transient HTTP error is captured as an error, not raised.
+
+    Used to assert this with 429 — which is now RETRIED, so the test both
+    slept through three real backoffs and measured retry behaviour while
+    claiming to measure capture. 401 is the honest case: an auth failure
+    will not fix itself.
+    """
     import urllib.error
 
     def _boom(req: Any, timeout: float | None = None) -> None:
         raise urllib.error.HTTPError(
-            "u", 429, "Too Many Requests", {}, None,  # type: ignore[arg-type]
+            "u", 401, "Unauthorized", {}, None,  # type: ignore[arg-type]
         )
 
     with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
                _boom):
-        res = _backend().run_worker(_spec(), tmp_path, 60)
+        res = _backend_noinv().run_worker(_spec(), tmp_path, 60)
     assert res.verdict is None
-    assert "429" in (res.error or "")
+    assert "401" in (res.error or "")
 
 
 def test_malformed_tool_arguments_do_not_kill_the_loop(
@@ -898,8 +1067,11 @@ def test_api_key_never_appears_in_an_error(tmp_path: Path) -> None:
     def _boom(req: Any, timeout: float | None = None) -> None:
         raise urllib.error.URLError("connection failed")
 
+    # URLError is transient now, so the backoff is stubbed: the subject
+    # here is what an error STRING contains, not how often we retry.
     with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
-               _boom):
-        res = _backend(api_key="sk-SUPERSECRET").run_worker(
+               _boom), patch("critic_orchestrator.agentic_api.time.sleep"):
+        res = _backend_noinv(api_key="sk-SUPERSECRET").run_worker(
             _spec(), tmp_path, 60)
     assert "SUPERSECRET" not in (res.error or "")
+    assert "SUPERSECRET" not in (res.raw_preview or "")
