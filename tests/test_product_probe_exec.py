@@ -226,3 +226,111 @@ def test_mcp_probe_fails_fast_without_operator_opt_in(
     assert "error" in out
     assert "CRITIC_ALLOW_EXEC" in out["error"]
     assert "job_id" not in out
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL, found by this product's own design review on this module and
+# CONFIRMED by writing a canary file: `python -c "<code>"` bypassed the
+# blocklist entirely and executed arbitrary code. The blocklist had learned
+# `bash -c` and `cmd /c` but not the interpreter this very module maps to
+# sys.executable.
+#
+# The cure must not be another blocklist entry. Blocklists are guessed;
+# this module's stated philosophy is to remove the VOCABULARY. So: for a
+# recognized interpreter, argv must match an ALLOWED SHAPE, and anything
+# else is refused without needing to have been imagined.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("payload", [
+    'python -c "print(1)"',
+    'python3 -c "print(1)"',
+    'py -c "print(1)"',
+    'python -X faulthandler -c "print(1)"',
+    'python -Sc "print(1)"',
+    'node -e "console.log(1)"',
+    'node --eval "1"',
+    'ruby -e "puts 1"',
+    'perl -e "print 1"',
+    'php -r "echo 1;"',
+    'deno eval "console.log(1)"',
+    'python -',
+])
+def test_inline_code_is_never_a_promise(tmp_path: Path, payload: str) -> None:
+    """Code carried IN the command line is the same channel as a shell."""
+    (tmp_path / "README.md").write_text(f"```bash\n{payload}\n```\n")
+    assert [p.command for p in extract_promises(tmp_path)] == []
+
+
+@pytest.mark.parametrize("payload", [
+    'python -c "open(\'CANARY\',\'w\').write(\'x\')"',
+    'node -e "require(\'fs\')"',
+])
+def test_inline_code_is_refused_again_at_execution(
+        tmp_path: Path, payload: str) -> None:
+    """Second layer: a hand-built Promise must not execute either."""
+    p = Promise(command=payload, kind="doc_command", source="README.md")
+    out = run_promise(p, tmp_path, timeout_s=30)
+    assert out["exit_code"] != 0
+    assert "refused" in (out.get("output") or "").lower()
+    assert not (tmp_path / "CANARY").exists()
+
+
+def test_the_confirmed_exploit_no_longer_writes_its_canary(
+        tmp_path: Path) -> None:
+    """The exact payload that wrote a canary during verification."""
+    canary = tmp_path / "CANARY_PWNED.txt"
+    payload = f"python -c \"open(r'{canary}','w').write('pwned')\""
+    (tmp_path / "README.md").write_text(f"```bash\n{payload}\n```\n")
+    assert extract_promises(tmp_path) == []
+    p = Promise(command=payload, kind="doc_command", source="README.md")
+    run_promise(p, tmp_path, timeout_s=30)
+    assert not canary.exists(), "arbitrary code still executed"
+
+
+@pytest.mark.parametrize("ok", [
+    "python -m pytest tests -q",
+    "python -m mypkg --help",
+    "python --version",
+    "python -V",
+    "mytool --help",
+])
+def test_legitimate_promises_still_survive(tmp_path: Path, ok: str) -> None:
+    """The cure must not eat the product: these are the shapes a README
+    really documents."""
+    (tmp_path / "README.md").write_text(f"```bash\n{ok}\n```\n")
+    assert [p.command for p in extract_promises(tmp_path)] == [ok]
+
+
+def test_a_script_outside_the_worktree_is_refused(tmp_path: Path) -> None:
+    """`python /elsewhere/x.py` runs code that is not the artifact's."""
+    outside = tmp_path.parent / "outside_script.py"
+    outside.write_text("print('hi')\n")
+    p = Promise(command=f"python {outside}", kind="doc_command",
+                source="README.md")
+    out = run_promise(p, tmp_path, timeout_s=30)
+    assert out["exit_code"] != 0
+    assert "refused" in (out.get("output") or "").lower()
+
+
+def test_a_script_inside_the_worktree_runs(tmp_path: Path) -> None:
+    (tmp_path / "demo.py").write_text("print('demo ok')\n")
+    p = Promise(command="python demo.py", kind="doc_command",
+                source="README.md")
+    out = run_promise(p, tmp_path, timeout_s=60)
+    assert out["exit_code"] == 0, out.get("output")
+    assert "demo ok" in (out.get("output") or "")
+
+
+def test_windows_paths_survive_tokenisation() -> None:
+    r"""POSIX shlex eats backslashes: `C:\tools\x.py` became `C:toolsx.py`,
+    so every containment decision was made about a corrupted string. Found
+    because a containment test passed for the wrong reason."""
+    from critic_orchestrator.product_probe import _split_command
+    argv = _split_command(r'python C:\tools\demo.py --flag')
+    assert argv == ["python", r"C:\tools\demo.py", "--flag"], argv
+
+
+def test_quoted_argument_keeps_its_spaces() -> None:
+    from critic_orchestrator.product_probe import _split_command
+    argv = _split_command('mytool --name "two words"')
+    assert argv == ["mytool", "--name", "two words"], argv

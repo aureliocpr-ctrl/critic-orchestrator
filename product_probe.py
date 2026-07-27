@@ -117,6 +117,99 @@ _REFUSED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 DEFAULT_PROMISE_CAP: int = 25
 
 
+# ---------------------------------------------------------------------------
+# Interpreter shapes — an ALLOWLIST, because the blocklist already failed
+# ---------------------------------------------------------------------------
+#
+# This product's own design review found, and a canary file CONFIRMED, that
+# `python -c "<code>"` walked straight through _REFUSED_PATTERNS and executed
+# arbitrary code. The blocklist had learned `bash -c` and `cmd /c` and missed
+# the interpreter this module itself maps to sys.executable.
+#
+# Adding `-c` to the blocklist would repeat the mistake in a smaller way:
+# blocklists enumerate what someone imagined (`-c`, then `-e`, then `-Sc`,
+# then `deno eval`, then the next runtime's spelling). So interpreters get an
+# allowlist instead — argv must match a shape we can NAME, and everything
+# else is refused without having had to be imagined.
+#
+# The line the allowlist draws: code that arrives IN THE COMMAND STRING is
+# refused; code that arrives FROM THE ARTIFACT (`-m mypkg`, `./script.py`
+# inside the worktree) is the product's own, which is exactly what a product
+# probe is for.
+
+#: Commands whose job is executing code handed to them on the command line.
+_INTERPRETERS: frozenset[str] = frozenset({
+    "python", "python3", "python2", "py", "pypy", "pypy3",
+    "node", "nodejs", "deno", "bun", "ts-node",
+    "ruby", "perl", "php", "lua", "R", "Rscript", "julia",
+    "osascript", "wscript", "cscript", "groovy", "scala", "kotlin",
+})
+
+#: Flags an interpreter is allowed to carry. Informational only, plus the
+#: two shapes that name something INSIDE the artifact.
+_ALLOWED_INTERP_FLAGS: frozenset[str] = frozenset({
+    "--version", "-V", "--help", "-h", "-u", "-B", "-q",
+})
+
+#: `-m module` / `--module`: the module is resolved by the interpreter from
+#: the worktree, not carried in the command line.
+_MODULE_FLAGS: frozenset[str] = frozenset({"-m", "--module"})
+
+#: A plausible dotted module name. Refuses anything with a separator, so
+#: `-m ../../evil` cannot pose as a module.
+_MODULE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+#: Script suffixes an interpreter may be pointed at (containment is checked
+#: separately, at execution, against the worktree).
+_SCRIPT_SUFFIXES: frozenset[str] = frozenset({
+    ".py", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".php", ".lua",
+    ".R", ".jl", ".scala", ".kts", ".groovy",
+})
+
+
+def _interpreter_shape_refusal(argv: list[str]) -> str | None:
+    """Reason this interpreter invocation is refused, or None if allowed.
+
+    Only called for argv[0] in `_INTERPRETERS`; every other command keeps
+    the blocklist as its only gate, because a product's OWN entry point
+    doing something odd is the product's contract, not this module's
+    business.
+    """
+    rest = argv[1:]
+    if not rest:
+        return None  # a bare REPL: harmless, and it just times out
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "-":
+            return ("reads a program from stdin — code carried into the "
+                    "command, not taken from the artifact")
+        if tok in _MODULE_FLAGS:
+            if i + 1 >= len(rest):
+                return f"{tok} without a module name"
+            module = rest[i + 1]
+            if not _MODULE_NAME_RE.match(module):
+                return (f"{tok} {module!r} is not a plain dotted module "
+                        "name")
+            return None  # module + its own args: allowed wholesale
+        if tok.startswith("-"):
+            if tok in _ALLOWED_INTERP_FLAGS:
+                i += 1
+                continue
+            # Everything else, named or not: `-c`, `-e`, `--eval`, `-Sc`
+            # (bundled short flags), and any flag a future runtime adds.
+            return (f"interpreter flag {tok!r} is not on the allowlist "
+                    f"(allowed: {', '.join(sorted(_ALLOWED_INTERP_FLAGS))}, "
+                    f"or -m <module>, or a script file) — inline code is "
+                    "the same channel as a shell")
+        # First non-flag token: a script, or a subcommand like `deno eval`.
+        if Path(tok).suffix in _SCRIPT_SUFFIXES:
+            return None
+        return (f"{argv[0]} {tok!r} is neither a module (-m) nor a script "
+                "file; it may execute code carried in the command line")
+    return None
+
+
 #: Verbs whose documented promise is "starts and stays up", not "exits 0".
 #: Three of the sixteen promises extracted from a real project were
 #: servers; scoring those broken on timeout would be a systematic false
@@ -172,8 +265,58 @@ def _clean_line(line: str) -> str:
     return s
 
 
+def _split_command(command: str) -> list[str]:
+    """Split a documented command into tokens WITHOUT eating backslashes.
+
+    `shlex.split` defaults to POSIX mode, where `\\` is an escape: it turns
+    `python C:\\tools\\x.py` into `C:toolsx.py`. Found by a containment
+    test that failed for the wrong reason — the path had been mangled into
+    something relative, so it stayed inside the tree by accident rather
+    than by the check. A silent path corruption is worse than a refusal:
+    it makes every containment decision about the wrong string.
+
+    So: non-POSIX splitting (backslash literal, as a Windows shell reads
+    it) and strip one layer of matching quotes per token. Declared cost:
+    a POSIX-style escaped space (`my\\ file.py`) splits into two tokens.
+    """
+    tokens = shlex.split(command, posix=False)
+    out: list[str] = []
+    for tok in tokens:
+        if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ("'", '"'):
+            tok = tok[1:-1]
+        out.append(tok)
+    return out
+
+
+def _refusal_reason(command: str) -> str | None:
+    """Why `command` is never executed, or None if it may be.
+
+    Two gates, deliberately different in kind: the pattern blocklist
+    (setup / destructive / outbound / shell-reintroducing) and, for
+    interpreters, the argv-shape ALLOWLIST — because the blocklist was
+    measured to miss `python -c` and blocklists only ever learn the
+    payload someone already thought of.
+    """
+    for p in _REFUSED_PATTERNS:
+        if p.search(command):
+            return ("matched a refused pattern (setup, destructive, "
+                    f"outbound, or shell-reintroducing): {p.pattern}")
+    try:
+        argv = _split_command(command)
+    except ValueError as exc:
+        return f"unparseable command: {exc}"
+    if not argv:
+        return "empty command"
+    head = Path(argv[0]).name
+    if head.lower().endswith(".exe"):
+        head = head[:-4]
+    if head in _INTERPRETERS:
+        return _interpreter_shape_refusal([head, *argv[1:]])
+    return None
+
+
 def _is_refused(command: str) -> bool:
-    return any(p.search(command) for p in _REFUSED_PATTERNS)
+    return _refusal_reason(command) is not None
 
 
 def _doc_promises(root: Path) -> list[Promise]:
@@ -376,12 +519,35 @@ def _promise_argv(command: str) -> list[str]:
     environment the operator mounted this server in", and a bare
     `python` on PATH may be a different install or absent on Windows.
     """
-    argv = shlex.split(command)
+    argv = _split_command(command)
     if not argv:
         raise PinnedExecError("empty command")
     if argv[0] in ("python", "python3", "py"):
         argv[0] = sys.executable
     return argv
+
+
+def _script_containment_refusal(argv: list[str], cwd: Path) -> str | None:
+    """Refuse a script argument that resolves outside `cwd`.
+
+    Same containment rule as the read sandbox — path COMPONENTS after
+    resolution, never a string prefix — because `/repo-evil` must not
+    pass for `/repo`, and a symlink must not walk out.
+    """
+    root = Path(cwd).resolve()
+    for tok in argv[1:]:
+        if tok.startswith("-") or Path(tok).suffix not in _SCRIPT_SUFFIXES:
+            continue
+        candidate = Path(tok)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            real = candidate.resolve()
+            real.relative_to(root)
+        except (OSError, ValueError):
+            return (f"script {tok!r} resolves outside the tree being "
+                    "probed — that code is not part of the artifact")
+    return None
 
 
 def run_promise(
@@ -397,15 +563,21 @@ def run_promise(
     buggy Promise must not become the day the probe ran `powershell -c`.
     """
     base: dict[str, Any] = {"command": promise.command}
-    if _is_refused(promise.command):
+    reason = _refusal_reason(promise.command)
+    if reason is not None:
         return {**base, "exit_code": -1, "timed_out": False,
-                "output": "refused: this command is never executed "
-                          "(shell, network, destructive, or setup)"}
+                "output": f"refused: {reason}"}
     try:
         argv = _promise_argv(promise.command)
     except (PinnedExecError, ValueError) as exc:
         return {**base, "exit_code": -1, "timed_out": False,
                 "output": f"refused: unparseable command ({exc})"}
+    # A script path must live INSIDE the tree being probed: `python
+    # /elsewhere/x.py` would run code that is not the artifact's.
+    contain = _script_containment_refusal(argv, Path(cwd))
+    if contain is not None:
+        return {**base, "exit_code": -1, "timed_out": False,
+                "output": f"refused: {contain}"}
     cmd = PinnedCommand(argv=argv, label=promise.command)
     try:
         res = run_pinned(cmd, cwd, timeout_s=timeout_s,

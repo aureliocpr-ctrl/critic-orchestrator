@@ -124,10 +124,20 @@ def main() -> int:
             for f in (result.get("findings") or [])[:10]:
                 print(f"  [{f.get('severity')}] {f.get('file')}:"
                       f"{f.get('line')}  {str(f.get('title'))[:100]}")
-            if result.get("status") not in ("no_blocking_findings",
-                                            "blocking_findings",
-                                            "incomplete"):
-                failures.append(f"design: {result.get('status')}")
+            # A GATE THAT DOES NOT GATE: the first version of this script
+            # listed `blocking_findings` among the accepted statuses, so
+            # it printed "all self-checks came back clean" underneath a
+            # CRITICAL it had just found. That is the exact class this
+            # product hunts, in the harness that hunts it.
+            blocking = int(sev.get("critical", 0)) + int(sev.get("high", 0))
+            if blocking:
+                failures.append(
+                    f"design: {blocking} blocking finding(s) "
+                    f"({sev.get('critical', 0)} critical, "
+                    f"{sev.get('high', 0)} high)")
+            elif result.get("status") == "undecided":
+                failures.append("design: undecided (no lens produced a "
+                                "verdict)")
 
     print(f"\nartifacts in {out_dir}")
     if failures:
