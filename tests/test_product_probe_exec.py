@@ -334,3 +334,124 @@ def test_quoted_argument_keeps_its_spaces() -> None:
     from critic_orchestrator.product_probe import _split_command
     argv = _split_command('mytool --name "two words"')
     assert argv == ["mytool", "--name", "two words"], argv
+
+
+# ---------------------------------------------------------------------------
+# SECOND CRITICAL, found by a DIFFERENT model (DeepSeek) on the code the
+# FIRST critical had already been fixed in — and verified before curing:
+# 6 of 9 versioned interpreter spellings walked through the shape
+# allowlist, because the allowlist of SHAPES rested on an exact-name set,
+# which is a blocklist one level down. Version suffixes are the rule on
+# Linux, not an exotic case.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("payload", [
+    'python3.11 -c "print(1)"',
+    'python3.12 -c "print(1)"',
+    'python2.7 -c "print(1)"',
+    'pypy3.10 -c "print(1)"',
+    'ruby3.1 -e "puts 1"',
+    'php8.2 -r "echo 1;"',
+    'perl5.36 -e "print 1"',
+    'python3.11.exe -c "print(1)"',
+    'node20 -e "1"',
+])
+def test_versioned_interpreters_cannot_carry_inline_code(
+        tmp_path: Path, payload: str) -> None:
+    (tmp_path / "README.md").write_text(f"```bash\n{payload}\n```\n")
+    assert [p.command for p in extract_promises(tmp_path)] == []
+    out = run_promise(
+        Promise(command=payload, kind="doc_command", source="README.md"),
+        tmp_path, timeout_s=20)
+    assert out["exit_code"] != 0
+    assert "refused" in (out.get("output") or "").lower()
+
+
+@pytest.mark.parametrize("ok", [
+    "python3.11 -m pytest tests -q",
+    "python3.12 --version",
+    "pypy3.10 -m mypkg",
+])
+def test_versioned_interpreters_keep_their_legitimate_shapes(
+        tmp_path: Path, ok: str) -> None:
+    (tmp_path / "README.md").write_text(f"```bash\n{ok}\n```\n")
+    assert [p.command for p in extract_promises(tmp_path)] == [ok]
+
+
+def test_a_versioned_python_still_maps_to_our_interpreter(
+        tmp_path: Path) -> None:
+    """`python3.11` may not exist on this machine (it does not, on
+    Windows): mapping every python spelling to sys.executable is what
+    keeps a working promise from scoring as broken."""
+    (tmp_path / "demo.py").write_text("print('demo ok')\n")
+    out = run_promise(
+        Promise(command="python3.11 demo.py", kind="doc_command",
+                source="README.md"),
+        tmp_path, timeout_s=60)
+    assert out["exit_code"] == 0, out.get("output")
+    assert "demo ok" in (out.get("output") or "")
+
+
+# ---------------------------------------------------------------------------
+# THIRD CRITICAL, from a THIRD model (Kimi), verified by reading the value
+# back: a promise inherited the MCP server's whole environment and printed
+# `sk-SECRET-CANARY-123`. The probe runs commands documented by a repo the
+# CALLER chose — handing that code the operator's API keys is credential
+# exposure, not a hypothetical.
+# ---------------------------------------------------------------------------
+
+def test_a_promise_cannot_read_the_servers_api_keys(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-CANARY-must-not-leak")
+    monkeypatch.setenv("CRITIC_API_KEY", "sk-CANARY-2")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-CANARY-3")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "sk-CANARY-4")
+    (tmp_path / "leak.py").write_text(
+        "import os\n"
+        "print('LEAKED=' + '|'.join(v for v in os.environ.values()\n"
+        "                            if 'CANARY' in v))\n")
+    out = run_promise(
+        Promise(command="python leak.py", kind="doc_command",
+                source="README.md"),
+        tmp_path, timeout_s=60)
+    assert out["exit_code"] == 0, out.get("output")
+    assert "CANARY" not in (out.get("output") or ""), (
+        "the promise read a secret from the server environment")
+
+
+def test_a_promise_still_gets_what_it_needs_to_run(
+        tmp_path: Path) -> None:
+    """Scrubbing must not break the product: a probe that cannot start
+    python scores every promise broken and is worse than useless."""
+    (tmp_path / "works.py").write_text(
+        "import os, sys\n"
+        "assert os.environ.get('PATH'), 'no PATH'\n"
+        "assert sys.executable, 'no interpreter'\n"
+        "print('ran fine')\n")
+    out = run_promise(
+        Promise(command="python works.py", kind="doc_command",
+                source="README.md"),
+        tmp_path, timeout_s=60)
+    assert out["exit_code"] == 0, out.get("output")
+    assert "ran fine" in (out.get("output") or "")
+
+
+def test_an_operator_can_name_a_variable_to_pass_through(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default-closed with a NAMED escape hatch: a project whose tests
+    genuinely need a variable must not force the operator to choose
+    between a working probe and leaking everything."""
+    monkeypatch.setenv("MY_APP_FIXTURE_MODE", "offline")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-CANARY-still-secret")
+    monkeypatch.setenv("CRITIC_EXEC_ENV_PASSTHROUGH", "MY_APP_FIXTURE_MODE")
+    (tmp_path / "check.py").write_text(
+        "import os\n"
+        "print('MODE=' + str(os.environ.get('MY_APP_FIXTURE_MODE')))\n"
+        "print('SECRET=' + str(os.environ.get('DEEPSEEK_API_KEY')))\n")
+    out = run_promise(
+        Promise(command="python check.py", kind="doc_command",
+                source="README.md"),
+        tmp_path, timeout_s=60)
+    text = out.get("output") or ""
+    assert "MODE=offline" in text, text
+    assert "SECRET=None" in text, text

@@ -187,6 +187,7 @@ def run_pinned(
     timeout_s: int = 300,
     require_worktree: bool = False,
     extra_env: dict[str, str] | None = None,
+    scrub_env: bool = True,
 ) -> PinnedResult:
     """Execute a pinned argv in `cwd`. No shell, bounded, tree-killed.
 
@@ -208,13 +209,15 @@ def run_pinned(
         raise PinnedExecError(
             f"refusing to execute outside an ephemeral worktree: {cwd}")
 
-    env = dict(os.environ)
-    # Keep the child from inheriting our own pytest/coverage context.
-    for noisy in ("PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS", "COV_CORE_SOURCE",
-                  "COVERAGE_FILE"):
-        env.pop(noisy, None)
-    if extra_env:
-        env.update(extra_env)
+    if scrub_env:
+        env = minimal_exec_env(extra_env)
+    else:  # pragma: no cover - kept for a deliberate operator override
+        env = dict(os.environ)
+        for noisy in ("PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS",
+                      "COV_CORE_SOURCE", "COVERAGE_FILE"):
+            env.pop(noisy, None)
+        if extra_env:
+            env.update(extra_env)
 
     t0 = _time.perf_counter()
     try:
@@ -253,6 +256,61 @@ def run_pinned(
 #: Cap per stream. Enough to see a pytest failure with its traceback,
 #: bounded so a chatty test cannot flood a model's context.
 run_pinned.MAX_OUTPUT_CHARS = 20_000  # type: ignore[attr-defined]
+
+
+#: Variables a process needs to START, on either platform. An ALLOWLIST,
+#: because the two blocklists this module shipped today were both proved
+#: incomplete within hours — and a blocklist of secret names would have to
+#: guess every provider's spelling forever (CRITIC_API_KEY, DEEPSEEK_,
+#: ZAI_, MOONSHOT_, AWS_, GH_, the next one).
+_ENV_ALLOWLIST: frozenset[str] = frozenset({
+    # POSIX
+    "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ", "USER",
+    "LOGNAME", "TERM",
+    # Windows
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP",
+    "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE",
+    "HOMEPATH", "NUMBER_OF_PROCESSORS", "OS", "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER", "COMMONPROGRAMFILES", "PROGRAMDATA",
+    "PROGRAMFILES", "PROGRAMFILES(X86)", "PUBLIC",
+    # Interpreter / environment selection (not secrets)
+    "PYTHONPATH", "PYTHONIOENCODING", "PYTHONUNBUFFERED", "PYTHONHASHSEED",
+    "PYTHONUTF8", "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV",
+    "PYENV_ROOT", "NODE_PATH", "GEM_HOME", "GEM_PATH",
+})
+
+#: Operator escape hatch: comma/os.pathsep-separated variable NAMES to let
+#: through. Default-closed with a named exception, so a project whose tests
+#: really need a variable does not force a choice between a working probe
+#: and leaking everything.
+_ENV_PASSTHROUGH_VAR = "CRITIC_EXEC_ENV_PASSTHROUGH"
+
+
+def minimal_exec_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment third-party code is allowed to see.
+
+    A third model's review, confirmed by reading the value back out of a
+    probe, showed a documented command printing `sk-…` from the server's
+    own `DEEPSEEK_API_KEY`: `run_pinned` copied `os.environ` wholesale, so
+    every promise and every test the critic ran received the operator's
+    provider keys. The repo is chosen by the CALLER, so this hands
+    caller-chosen code the operator's credentials.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k.upper() in _ENV_ALLOWLIST}
+    raw = (os.environ.get(_ENV_PASSTHROUGH_VAR) or "").strip()
+    if raw:
+        for name in re.split(r"[,;:]" if os.pathsep == ":" else r"[,;]", raw):
+            name = name.strip()
+            if name and name in os.environ:
+                env[name] = os.environ[name]
+    # Keep the child out of OUR pytest/coverage session either way.
+    for noisy in ("PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS", "COV_CORE_SOURCE",
+                  "COVERAGE_FILE"):
+        env.pop(noisy, None)
+    if extra:
+        env.update(extra)
+    return env
 
 
 def worktree_pythonpath_env(wt: Path) -> dict[str, str]:
@@ -410,6 +468,7 @@ __all__ = [
     "PinnedResult",
     "build_pinned_pytest",
     "ephemeral_worktree",
+    "minimal_exec_env",
     "run_falsification_probe",
     "run_pinned",
     "worktree_pythonpath_env",

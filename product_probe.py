@@ -137,13 +137,40 @@ DEFAULT_PROMISE_CAP: int = 25
 # inside the worktree) is the product's own, which is exactly what a product
 # probe is for.
 
-#: Commands whose job is executing code handed to them on the command line.
-_INTERPRETERS: frozenset[str] = frozenset({
-    "python", "python3", "python2", "py", "pypy", "pypy3",
-    "node", "nodejs", "deno", "bun", "ts-node",
-    "ruby", "perl", "php", "lua", "R", "Rscript", "julia",
-    "osascript", "wscript", "cscript", "groovy", "scala", "kotlin",
-})
+#: Commands whose job is executing code handed to them on the command
+#: line, matched as a FAMILY rather than an exact name.
+#:
+#: The exact-name frozenset that lived here was itself a blocklist one
+#: level down, and a second independent review proved it: `python3.11 -c`
+#: sailed through the shape check because "python3.11" was not "python3"
+#: — 6 of 9 versioned spellings bypassed it (pypy3.10, ruby3.1, php8.2,
+#: perl5.36 …). Version suffixes are the rule on Linux, not an exotic
+#: case. So: a stem plus an optional version tail, which covers the
+#: spellings nobody enumerated.
+_INTERPRETER_RE = re.compile(
+    r"^(?:"
+    r"python|py|pypy|ipython|"
+    r"node|nodejs|deno|bun|ts-node|tsx|"
+    r"ruby|jruby|perl|raku|php|lua|luajit|"
+    r"[Rr]script|julia|groovy|scala|kotlin|swift|"
+    r"osascript|wscript|cscript|"
+    r"tclsh|wish|ghci|runghc|elixir|iex|escript"
+    r")[0-9]*(?:[._-][0-9]+)*$",
+    re.IGNORECASE,
+)
+
+
+def _is_interpreter(name: str) -> bool:
+    """True for `python`, `python3`, `python3.11`, `pypy3.10`, `php8.2` …
+
+    A heuristic, and its residue is stated rather than hidden: a binary
+    this pattern does not know that nevertheless takes a program on its
+    command line is not covered here. What still stands between it and
+    damage is the pattern blocklist, the absence of a shell, and the
+    ephemeral worktree — the promise runs against a disposable checkout,
+    never the real tree.
+    """
+    return bool(_INTERPRETER_RE.match(name))
 
 #: Flags an interpreter is allowed to carry. Informational only, plus the
 #: two shapes that name something INSIDE the artifact.
@@ -310,7 +337,7 @@ def _refusal_reason(command: str) -> str | None:
     head = Path(argv[0]).name
     if head.lower().endswith(".exe"):
         head = head[:-4]
-    if head in _INTERPRETERS:
+    if _is_interpreter(head):
         return _interpreter_shape_refusal([head, *argv[1:]])
     return None
 
@@ -522,7 +549,16 @@ def _promise_argv(command: str) -> list[str]:
     argv = _split_command(command)
     if not argv:
         raise PinnedExecError("empty command")
-    if argv[0] in ("python", "python3", "py"):
+    head = Path(argv[0]).name
+    if head.lower().endswith(".exe"):
+        head = head[:-4]
+    # Any python spelling — `python`, `python3`, `python3.11` — maps to
+    # OUR interpreter: the promise is "this works in the environment the
+    # operator mounted this server in", and `python3.11` on PATH may be a
+    # different install, or absent (it is, on Windows), which would score
+    # a working promise as broken.
+    if re.match(r"^(?:python|py|pypy)[0-9]*(?:[._-][0-9]+)*$", head,
+                re.IGNORECASE):
         argv[0] = sys.executable
     return argv
 
