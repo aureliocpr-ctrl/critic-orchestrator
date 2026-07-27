@@ -109,6 +109,19 @@ def _backend(**kw: Any) -> AgenticApiBackend:
     return AgenticApiBackend(**defaults)  # type: ignore[arg-type]
 
 
+def _backend_noinv(**kw: Any) -> AgenticApiBackend:
+    """Backend with the investigation challenge OFF.
+
+    Production challenges a verdict submitted without a single read (see
+    test_a_verdict_with_no_investigation_is_challenged). Tests that isolate
+    a DIFFERENT behaviour — tool advertisement, cancellation, malformed
+    arguments — submit immediately by design, and would otherwise all be
+    measuring the challenge instead of their own subject.
+    """
+    kw.setdefault("require_investigation", False)
+    return _backend(**kw)
+
+
 # ---------------------------------------------------------------------------
 # Sandbox — the security boundary
 # ---------------------------------------------------------------------------
@@ -273,7 +286,7 @@ def test_execution_worker_is_NOT_skipped(tmp_path: Path) -> None:
     ])
     with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
                scripted):
-        res = _backend().run_worker(_spec(requires_execution=True),
+        res = _backend_noinv().run_worker(_spec(requires_execution=True),
                                     tmp_path, 60)
     assert res.error is None
     assert res.verdict == {"claim_holds": True, "evidence": "read it"}
@@ -307,7 +320,7 @@ def test_tools_are_advertised_with_submit_verdict(tmp_path: Path) -> None:
     ])
     with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
                scripted):
-        _backend().run_worker(_spec(), tmp_path, 60)
+        _backend_noinv().run_worker(_spec(), tmp_path, 60)
     names = {t["function"]["name"] for t in scripted.requests[0]["tools"]}
     assert names == {"fs_read", "fs_list", "fs_glob", "fs_grep",
                      "submit_verdict"}
@@ -398,7 +411,7 @@ def test_tool_choice_rejection_is_retried_without_it(tmp_path: Path) -> None:
 
     with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
                _fake):
-        res = _backend(max_steps=1).run_worker(_spec(), tmp_path, 60)
+        res = _backend_noinv(max_steps=1).run_worker(_spec(), tmp_path, 60)
     assert res.verdict is not None
     assert calls["n"] == 2  # forced attempt, then the plain retry
 
@@ -425,17 +438,29 @@ def test_unparseable_final_message_is_an_error(tmp_path: Path) -> None:
     assert res.error
 
 
-def test_verdict_missing_required_field_is_rejected(tmp_path: Path) -> None:
-    """A verdict that does not satisfy the schema's required keys is an
-    error: half a verdict must not be aggregated as a vote."""
+def test_rejection_names_the_offending_field(tmp_path: Path) -> None:
+    """Half a verdict must not be aggregated as a vote — and the feedback
+    has to be actionable: name the field, so the model can fix THAT
+    instead of guessing. (Superseded the older variant of this test, which
+    asserted an immediate hard failure; the contract now sends the error
+    back for correction.)"""
     scripted = _Scripted([
-        _assistant_tool_call("submit_verdict", {"evidence": "no bool"}),
+        _assistant_tool_call("submit_verdict", {"evidence": "no bool"}, "c1"),
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": True, "evidence": "fixed"},
+                             "c2"),
     ])
     with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
                scripted):
-        res = _backend().run_worker(_spec(), tmp_path, 60)
-    assert res.verdict is None
-    assert "required" in (res.error or "").lower()
+        res = _backend_noinv().run_worker(_spec(), tmp_path, 60)
+    assert res.verdict == {"claim_holds": True, "evidence": "fixed"}
+    feedback = [
+        m["content"] for r in scripted.requests for m in r["messages"]
+        if m["role"] == "tool"
+    ]
+    assert any("claim_holds" in f for f in feedback), (
+        f"feedback never named the missing field: {feedback}"
+    )
 
 
 def test_http_error_is_captured(tmp_path: Path) -> None:
@@ -467,7 +492,7 @@ def test_malformed_tool_arguments_do_not_kill_the_loop(
     ])
     with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
                scripted):
-        res = _backend().run_worker(_spec(), tmp_path, 60)
+        res = _backend_noinv().run_worker(_spec(), tmp_path, 60)
     assert res.verdict is not None
 
 
@@ -493,6 +518,115 @@ def test_read_budget_stops_a_runaway_reader(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Verdict integrity — findings from the first real dogfooding run
+# ---------------------------------------------------------------------------
+
+def test_a_verdict_with_no_investigation_is_challenged(tmp_path: Path) -> None:
+    """A reviewer that submits without reading anything has REASONED, not
+    observed. Found by DeepSeek reviewing this backend: "the backend cannot
+    tell a genuine investigation from a simulated one" — a model could
+    answer "looks fine to me" in one call and be believed. Challenge it
+    once, with the reason, rather than accept or hard-fail."""
+    scripted = _Scripted([
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": True, "evidence": "looks fine"},
+                             "c1"),
+        _assistant_tool_call("fs_read", {"path": "m.py"}, "c2"),
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": False, "evidence": "line 1"},
+                             "c3"),
+    ])
+    (tmp_path / "m.py").write_text("x = 1\n")
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend(max_steps=6).run_worker(_spec(), tmp_path, 60)
+    # The premature verdict was refused, the model investigated, then the
+    # second verdict stands.
+    assert res.verdict == {"claim_holds": False, "evidence": "line 1"}
+    challenge = [
+        m for r in scripted.requests for m in r["messages"]
+        if m["role"] == "tool" and "without" in str(m.get("content", "")).lower()
+    ]
+    assert challenge, "no challenge was sent for the uninvestigated verdict"
+
+
+def test_an_insisted_verdict_is_accepted_but_flagged(tmp_path: Path) -> None:
+    """If the model insists after the challenge, take the verdict — but
+    record that nothing was read, so a caller can weigh it."""
+    scripted = _Scripted([
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": True, "evidence": "e"}, "c1"),
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": True, "evidence": "e"}, "c2"),
+    ])
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend(max_steps=6).run_worker(_spec(), tmp_path, 60)
+    assert res.verdict is not None
+    assert res.verdict.get("_uninvestigated") is True
+
+
+def test_wrong_field_types_are_challenged_not_silently_accepted(
+    tmp_path: Path,
+) -> None:
+    """`claim_holds: "yes please"` used to be accepted, and then
+    _extract_vote returned None — a worker that looks OK whose vote
+    silently does not count. Schema types are checked and fed back."""
+    (tmp_path / "m.py").write_text("x = 1\n")
+    scripted = _Scripted([
+        _assistant_tool_call("fs_read", {"path": "m.py"}, "c0"),
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": "yes please", "evidence": 42},
+                             "c1"),
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": True, "evidence": "ok"}, "c2"),
+    ])
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend(max_steps=6).run_worker(_spec(), tmp_path, 60)
+    assert res.verdict == {"claim_holds": True, "evidence": "ok"}
+    fed_back = [
+        m for r in scripted.requests for m in r["messages"]
+        if m["role"] == "tool" and "boolean" in str(m.get("content", "")).lower()
+    ]
+    assert fed_back, "the type error was never explained to the model"
+
+
+def test_missing_fields_are_fed_back_instead_of_failing_the_worker(
+    tmp_path: Path,
+) -> None:
+    """Two of six lenses died in the first dogfooding run on a malformed
+    submit. Losing a whole reviewer to a fixable mistake is waste: send
+    the error back and let it correct."""
+    (tmp_path / "m.py").write_text("x = 1\n")
+    scripted = _Scripted([
+        _assistant_tool_call("fs_read", {"path": "m.py"}, "c0"),
+        _assistant_tool_call("submit_verdict", {"evidence": "no bool"}, "c1"),
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": True, "evidence": "fixed"},
+                             "c2"),
+    ])
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend(max_steps=6).run_worker(_spec(), tmp_path, 60)
+    assert res.verdict == {"claim_holds": True, "evidence": "fixed"}
+
+
+def test_repeated_malformed_verdicts_eventually_fail(tmp_path: Path) -> None:
+    """The correction loop is bounded: a model that cannot produce a
+    valid verdict must end as an error, not spin."""
+    scripted = _Scripted([
+        _assistant_tool_call("submit_verdict", {"nope": 1}, f"c{i}")
+        for i in range(6)
+    ])
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend(max_steps=6).run_worker(_spec(), tmp_path, 60)
+    assert res.verdict is None
+    assert "required" in (res.error or "").lower()
+
+
+# ---------------------------------------------------------------------------
 # Endpoint construction — providers do not agree on the version segment
 # ---------------------------------------------------------------------------
 
@@ -500,6 +634,13 @@ def test_read_budget_stops_a_runaway_reader(tmp_path: Path) -> None:
     # Already versioned: append the path, never a second version segment.
     ("https://api.deepseek.com/v1",
      "https://api.deepseek.com/v1/chat/completions"),
+    # Non-numeric version suffixes are real: Gemini ships /v1beta. The
+    # first regex was /v\d+$ and turned it into /v1beta/v1/... — found by
+    # DeepSeek reviewing this file, verified live-shaped.
+    ("https://generativelanguage.googleapis.com/v1beta",
+     "https://generativelanguage.googleapis.com/v1beta/chat/completions"),
+    ("https://foo.dev/api/v2alpha",
+     "https://foo.dev/api/v2alpha/chat/completions"),
     # GLM lives under /api/paas/v4. Appending /v1 produced
     # /v4/v1/chat/completions and a live 404 — found by the smoke run,
     # invisible to every mocked test because they all used /v1 bases.
@@ -558,7 +699,7 @@ def test_worker_needing_exec_is_skipped_not_answered(tmp_path: Path) -> None:
     assert "skip" in (res.error or "").lower()
 
 
-def test_read_only_workers_run_on_the_agentic_backend(tmp_path: Path) -> None:
+def test_read_only_workers_run_on_the_agentic_backend_noinv(tmp_path: Path) -> None:
     """caller_verification needs only grep, and the design lenses only
     read — those must run, which is the point of this backend."""
     from critic_orchestrator.default_workers import build_default_workers
@@ -584,7 +725,7 @@ def test_read_only_workers_run_on_the_agentic_backend(tmp_path: Path) -> None:
         ])
         with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
                    scripted):
-            res = _backend().run_worker(spec, tmp_path, 60)
+            res = _backend_noinv().run_worker(spec, tmp_path, 60)
         assert res.error is None, f"{spec.name}: {res.error}"
         assert res.verdict is not None
 
@@ -684,7 +825,7 @@ def test_agentic_backend_runs_normally_when_not_cancelled(
     ])
     with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
                scripted):
-        res = _backend().run_worker(_spec(), tmp_path, 60,
+        res = _backend_noinv().run_worker(_spec(), tmp_path, 60,
                                     cancel_check=lambda: False)
     assert res.verdict is not None
 

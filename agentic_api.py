@@ -73,8 +73,58 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 })
 
 
-#: A trailing API version segment, e.g. `/v1`, `/v4` (GLM: `/api/paas/v4`).
-_VERSION_SEGMENT_RE = re.compile(r"/v\d+$")
+#: A trailing API version segment: `/v1`, `/v4` (GLM: `/api/paas/v4`), and
+#: the non-numeric suffixes that are equally real — Gemini ships
+#: `/v1beta`. The first version of this pattern was `/v\d+$`, which turned
+#: `/v1beta` into `/v1beta/v1/chat/completions`.
+_VERSION_SEGMENT_RE = re.compile(r"/v\d+[a-z]*\d*$", re.IGNORECASE)
+
+#: How many times a malformed verdict is sent back for correction before
+#: the worker is failed. Bounded so a model that cannot produce a valid
+#: verdict ends as an error instead of spinning.
+_MAX_VERDICT_CORRECTIONS: int = 2
+
+_JSON_TYPE_CHECKS: dict[str, type | tuple[type, ...]] = {
+    "boolean": bool,
+    "string": str,
+    "number": (int, float),
+    "integer": int,
+    "array": list,
+    "object": dict,
+}
+
+
+def _verdict_problems(payload: dict, schema: dict[str, Any]) -> list[str]:
+    """Human-readable reasons this payload is not a usable verdict.
+
+    Checks required keys AND their declared types. Types matter as much as
+    presence: `claim_holds: "yes please"` used to be accepted, and then the
+    aggregator's vote extractor returned None — a worker that looks
+    successful whose vote silently does not count.
+    """
+    problems: list[str] = []
+    for key in schema.get("required") or []:
+        if key not in payload:
+            problems.append(f"missing required field {key!r}")
+    props = schema.get("properties") or {}
+    for key, spec in props.items():
+        if key not in payload or not isinstance(spec, dict):
+            continue
+        declared = spec.get("type")
+        expected = _JSON_TYPE_CHECKS.get(declared) if declared else None
+        if expected is None:
+            continue
+        value = payload[key]
+        # bool is a subclass of int: a boolean is not an acceptable number.
+        if declared in ("number", "integer") and isinstance(value, bool):
+            problems.append(f"field {key!r} must be a {declared}, got boolean")
+            continue
+        if not isinstance(value, expected):
+            problems.append(
+                f"field {key!r} must be a {declared}, got "
+                f"{type(value).__name__}"
+            )
+    return problems
 
 
 class _SandboxError(Exception):
@@ -371,6 +421,9 @@ class AgenticApiBackend:
     #: mutates or executes. A worker whose `needs` exceed this is skipped,
     #: never answered — see the check at the top of run_worker.
     capabilities: frozenset[str] = frozenset({"read"})
+    #: Challenge a verdict submitted without a single read. Off only for
+    #: reviewers that legitimately conclude from the prompt alone.
+    require_investigation: bool = True
 
     def _endpoint(self) -> str:
         """Build the chat-completions URL without inventing a path.
@@ -442,6 +495,12 @@ class AgenticApiBackend:
         #: spend.
         trace: list[str] = []
         nudged = False
+        #: Reads actually performed. Gates the "verdict with no
+        #: investigation" challenge below.
+        reads_done = 0
+        investigation_challenged = False
+        corrections = 0
+        require_investigation = self.require_investigation
         while steps < self.max_steps:
             if cancel_check is not None and cancel_check():
                 return BackendResult(
@@ -569,14 +628,57 @@ class AgenticApiBackend:
                     continue
 
                 if name == "submit_verdict":
-                    missing = _missing_required(args, spec.schema)
-                    if missing:
-                        return BackendResult(
-                            verdict=None,
-                            error=(f"verdict missing required field(s): "
-                                   f"{missing}"),
-                            raw_preview=json.dumps(args)[:500],
-                        )
+                    problems = _verdict_problems(args, spec.schema)
+                    if problems:
+                        # Feed the error BACK instead of losing the whole
+                        # reviewer: two of six lenses died on a fixable
+                        # malformed submit in the first dogfooding run.
+                        corrections += 1
+                        trace.append(f"step{steps}:verdict-rejected")
+                        if corrections > _MAX_VERDICT_CORRECTIONS:
+                            return BackendResult(
+                                verdict=None,
+                                error=("verdict invalid after "
+                                       f"{_MAX_VERDICT_CORRECTIONS} "
+                                       f"correction(s): {problems}"),
+                                raw_preview=json.dumps(args)[:500],
+                            )
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call.get("id", ""),
+                            "content": (
+                                "Your verdict was NOT accepted: "
+                                + "; ".join(problems)
+                                + ". Call submit_verdict again with every "
+                                "required field, using the declared types."
+                            ),
+                        })
+                        continue
+                    if require_investigation and reads_done == 0:
+                        # A verdict with no observation behind it is a
+                        # conclusion reasoned from nothing. Challenge once,
+                        # with the reason; if the model insists, take it but
+                        # mark it so a caller can weigh it.
+                        if not investigation_challenged:
+                            investigation_challenged = True
+                            corrections += 1
+                            trace.append(f"step{steps}:no-investigation")
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": call.get("id", ""),
+                                "content": (
+                                    "Your verdict was submitted WITHOUT "
+                                    "reading any file, so it rests on no "
+                                    "observation. Use fs_read / fs_grep on "
+                                    "the code first, then submit. If you "
+                                    "genuinely need no evidence, submit the "
+                                    "same verdict again."
+                                ),
+                            })
+                            continue
+                        args = dict(args)
+                        args["_uninvestigated"] = True
+                        trace.append(f"step{steps}:accepted-uninvestigated")
                     return BackendResult(verdict=args, error=None)
 
                 trace.append(
@@ -591,6 +693,8 @@ class AgenticApiBackend:
                 else:
                     out = _run_tool(name, args, root)
                     spent += len(out)
+                    if not out.lower().startswith("error"):
+                        reads_done += 1
                     if spent >= self.read_budget_bytes:
                         out += ("\n[read budget now exhausted — further "
                                 "reads will be refused; submit_verdict "
