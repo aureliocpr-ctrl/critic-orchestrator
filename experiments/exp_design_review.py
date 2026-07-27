@@ -45,13 +45,17 @@ from critic_orchestrator.design_workers import (
 )
 from critic_orchestrator.orchestrator import WorkerSpec, adversarial_review
 
-PROJECT_DIR = Path("C:/Users/aurel/Code/HippoAgent")
-M1 = ["verimem/semantic.py"]
-M2 = ["verimem/encode_service.py"]
+# The experiment targets a specific repository (the one it was
+# pre-registered against). Override both via env to re-run it elsewhere;
+# results land beside the run rather than in a hardcoded scratch path.
+PROJECT_DIR = Path(
+    os.environ.get("EXP_PROJECT_DIR") or "C:/Users/aurel/Code/HippoAgent"
+)
+M1 = (os.environ.get("EXP_M1") or "verimem/semantic.py").split(",")
+M2 = (os.environ.get("EXP_M2") or "verimem/encode_service.py").split(",")
 RESULTS_DIR = Path(
-    r"C:\Users\aurel\AppData\Local\Temp\claude"
-    r"\C--Users-aurel-Desktop-ProgettiAI"
-    r"\7f4739c4-043f-46b4-9280-5277b54e26e8\scratchpad\design_exp"
+    os.environ.get("EXP_RESULTS_DIR")
+    or (Path(os.environ.get("TEMP", "/tmp")) / "critic_design_exp")
 )
 TIMEOUT_S = 480  # semantic.py is 5.7k lines; give readers room
 READONLY = ("--allowedTools", "Read Grep Glob")

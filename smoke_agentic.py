@@ -22,7 +22,13 @@ from pathlib import Path
 from .agentic_api import AgenticApiBackend
 from .design_workers import build_design_workers
 
-_KEYS_ENV = Path.home() / ".clp" / "keys.env"
+#: Optional key file, one `NAME=value` per line. Override with
+#: CRITIC_KEYS_ENV. Plain environment variables work too and take
+#: precedence in spirit — the file is a convenience, not a requirement.
+_KEYS_ENV = Path(
+    os.environ.get("CRITIC_KEYS_ENV")
+    or (Path.home() / ".clp" / "keys.env")
+)
 
 #: (label, key-env-name, base_url-env-name-or-literal, model)
 #: Model ids are NOT guessed: they were read from each provider's
@@ -50,6 +56,15 @@ def _load_keys() -> dict[str, str]:
     return out
 
 
+def _repo_root() -> Path:
+    """The directory that CONTAINS the `critic_orchestrator` package.
+
+    Derived from this file, never hardcoded: the smoke has to run for
+    anyone who clones the repo, not just on the machine it was written on.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
 def _target_file(root: Path) -> str:
     """A small, self-contained module: enough to review, cheap to read."""
     return "critic_orchestrator/job_registry.py"
@@ -59,9 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     only = {a.lower() for a in argv} or None
     keys = _load_keys()
-    root = Path("C:/Users/aurel/.claude")
+    root = _repo_root()
     target = _target_file(root)
-    assert (root / target).is_file(), target
+    assert (root / target).is_file(), f"{target} not found under {root}"
 
     # One lens (premortem) is enough for a smoke: it exercises tool use,
     # the schema, and the sandbox in one pass.

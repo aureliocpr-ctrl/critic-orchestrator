@@ -31,3 +31,8 @@ worker_*.log
 
 # Local smoke-test outputs
 smoke_output_*.json
+
+# Packaging artefacts
+dist/
+build/
+*.egg-info/
