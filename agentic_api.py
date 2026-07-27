@@ -186,11 +186,36 @@ def _rel(root: Path, p: Path) -> str:
         return str(p)
 
 
+def _open_verified(path: Path) -> bytes:
+    """Read `path`, confirming AFTER the open that we got what we checked.
+
+    Containment is proved on a resolved path, but between that proof and
+    the open the name can be re-pointed — a symlink swap wins the race and
+    the sandbox reads a file it already approved by a different name. So:
+    stat the path, open it, then stat the OPEN DESCRIPTOR and require the
+    same (device, inode). If they differ, the object changed under us and
+    the read is refused.
+
+    Windows fills st_ino/st_dev for real files, so this works on both
+    platforms; when either side reports 0 (some network filesystems), the
+    identity check cannot be made and we say so rather than pretend.
+    """
+    before = os.stat(path)
+    with open(path, "rb") as fh:
+        after = os.stat(fh.fileno())
+        if (before.st_ino, before.st_dev) != (after.st_ino, after.st_dev):
+            raise _SandboxError(
+                "file identity changed between check and open "
+                "(symlink/rename race) — read refused"
+            )
+        return fh.read(MAX_READ_BYTES + 1)
+
+
 def _tool_fs_read(args: dict, root: Path) -> str:
     path = _resolve_in_sandbox(str(args.get("path", "")), root)
     if not path.is_file():
         return f"error: not a file: {args.get('path')!r}"
-    raw = path.read_bytes()
+    raw = _open_verified(path)
     truncated = len(raw) > MAX_READ_BYTES
     text = raw[:MAX_READ_BYTES].decode("utf-8", errors="replace")
     lines = text.splitlines()
@@ -360,6 +385,95 @@ _SYSTEM = (
 )
 
 
+def _assemble_stream(resp: Any) -> dict[str, Any]:
+    """Rebuild one assistant message from an SSE delta stream.
+
+    Streaming matters for real reasoning models: a non-streaming request
+    stays silent for as long as the model thinks, and a silent connection
+    is what intermediaries kill. Kimi k3 reset at 145 s twice while the
+    same prompt streams with its first byte at 1.8 s — and Moonshot's docs
+    call streaming "strongly recommended" for long tasks for exactly this
+    reason.
+
+    REASSEMBLY RULES, each one a way to get it wrong:
+      * tool calls arrive as partial deltas keyed by ``index`` — id and
+        name in one chunk, arguments dribbled across many, and parallel
+        calls interleaved. Accumulate PER INDEX, never by arrival order.
+      * ``reasoning_content`` (thinking models) is NOT content: folding it
+        in would feed the model's scratchpad to a verdict parser.
+      * a malformed chunk is skipped, not fatal: losing a whole answer to
+        one bad frame would be indistinguishable from a model failure.
+      * ``[DONE]`` ends the stream; blank lines and ``:`` comments (SSE
+        keep-alives) are ignored.
+    """
+    content_parts: list[str] = []
+    # index -> {"id": str, "type": str, "name": str, "args": [str, ...]}
+    calls: dict[int, dict[str, Any]] = {}
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace").strip() \
+            if isinstance(raw, (bytes, bytearray)) else str(raw).strip()
+        if not line or line.startswith(":"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            piece = delta.get("content")
+            if isinstance(piece, str):
+                content_parts.append(piece)
+            for tc in delta.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                idx = tc.get("index")
+                if not isinstance(idx, int):
+                    idx = len(calls)
+                slot = calls.setdefault(
+                    idx, {"id": "", "type": "function", "name": "",
+                          "args": []},
+                )
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                if tc.get("type"):
+                    slot["type"] = tc["type"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn["name"]
+                frag = fn.get("arguments")
+                if isinstance(frag, str) and frag:
+                    slot["args"].append(frag)
+    msg: dict[str, Any] = {"role": "assistant",
+                            "content": "".join(content_parts)}
+    if calls:
+        msg["tool_calls"] = [
+            {"id": calls[i]["id"] or f"call_{i}",
+             "type": calls[i]["type"] or "function",
+             "function": {"name": calls[i]["name"],
+                          "arguments": "".join(calls[i]["args"])}}
+            for i in sorted(calls)
+        ]
+    return msg
+
+
+def _ctx_bytes(messages: list[dict[str, Any]]) -> int:
+    """Approximate size of the conversation sent upstream.
+
+    Reported on transport failures: a mid-loop reset correlates with how
+    much context the request carried, and guessing is what produced a
+    wrong "the provider is flaky" diagnosis once already.
+    """
+    try:
+        return len(json.dumps(messages))
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return -1
+
+
 def _missing_required(payload: dict, schema: dict[str, Any]) -> list[str]:
     required = schema.get("required") or []
     return [k for k in required if k not in payload]
@@ -424,6 +538,11 @@ class AgenticApiBackend:
     #: Challenge a verdict submitted without a single read. Off only for
     #: reviewers that legitimately conclude from the prompt alone.
     require_investigation: bool = True
+    #: Stream the response (SSE) instead of waiting for the whole body.
+    #: Opt-in: the non-streaming shape is the one verified against three
+    #: providers, while streaming is what keeps a long reasoning request
+    #: from sitting silent long enough for an intermediary to kill it.
+    stream: bool = False
 
     def _endpoint(self) -> str:
         """Build the chat-completions URL without inventing a path.
@@ -443,16 +562,28 @@ class AgenticApiBackend:
         return base + "/chat/completions"
 
     def _post(self, body: dict, timeout: int) -> dict:
+        """One request. Returns a payload shaped like the JSON API.
+
+        When streaming, the SSE deltas are reassembled into the same
+        `{"choices": [{"message": ...}]}` shape, so the loop above does not
+        branch on transport.
+        """
+        streaming = bool(self.stream)
+        if streaming:
+            body = {**body, "stream": True}
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if streaming:
+            headers["Accept"] = "text/event-stream"
         req = urllib.request.Request(
-            self._endpoint(),
-            data=json.dumps(body).encode(),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+            self._endpoint(), data=json.dumps(body).encode(),
+            headers=headers, method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if streaming:
+                return {"choices": [{"message": _assemble_stream(resp)}]}
             return json.loads(resp.read().decode())
 
     def run_worker(
@@ -569,14 +700,25 @@ class AgenticApiBackend:
             except urllib.error.URLError as exc:
                 return BackendResult(
                     verdict=None, error=f"transport: {exc.reason}",
+                    # The trace was missing on the transport paths, which is
+                    # exactly where it is needed: a mid-loop connection
+                    # reset is undiagnosable without knowing which step and
+                    # how much context it died on.
+                    raw_preview=(f"step={steps} ctx_msgs={len(messages)} "
+                                 f"ctx_bytes={_ctx_bytes(messages)} | "
+                                 + " | ".join(trace)),
                 )
             except (TimeoutError, OSError) as exc:
                 return BackendResult(
                     verdict=None, error=f"{type(exc).__name__}: {exc}",
+                    raw_preview=(f"step={steps} ctx_msgs={len(messages)} "
+                                 f"ctx_bytes={_ctx_bytes(messages)} | "
+                                 + " | ".join(trace)),
                 )
             except json.JSONDecodeError as exc:
                 return BackendResult(
                     verdict=None, error=f"non-JSON response: {exc}",
+                    raw_preview=" | ".join(trace),
                 )
 
             choices = payload.get("choices") or []
@@ -679,7 +821,12 @@ class AgenticApiBackend:
                         args = dict(args)
                         args["_uninvestigated"] = True
                         trace.append(f"step{steps}:accepted-uninvestigated")
-                    return BackendResult(verdict=args, error=None)
+                    trace.append(f"step{steps}:verdict")
+                    # Trace on SUCCESS too: without it a run that worked
+                    # tells you nothing about how, and comparing a healthy
+                    # run against a failed one is the whole diagnostic.
+                    return BackendResult(verdict=args, error=None,
+                                          raw_preview=" | ".join(trace))
 
                 trace.append(
                     f"step{steps}:{name}"

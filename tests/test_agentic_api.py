@@ -170,6 +170,43 @@ def test_sandbox_prefix_is_not_string_matching(tmp_path: Path) -> None:
         _resolve_in_sandbox(str(sibling / "x.txt"), root)
 
 
+def test_read_is_verified_after_open_not_only_before(tmp_path: Path) -> None:
+    """TOCTOU: containment was proved on the resolved PATH, then the file
+    was opened by that path — and between the two, the path can become a
+    symlink out of the sandbox. Flagged by DeepSeek reviewing this file.
+    The read must confirm the object it ACTUALLY opened is the one it
+    checked (identity by device+inode), not trust that the name still
+    means what it meant.
+
+    Simulated by swapping the file's identity between the check and the
+    read, which is what a winning race looks like from inside.
+    """
+    (tmp_path / "m.py").write_text("legit\n")
+    real_stat = os.stat
+
+    def _stat_where_the_descriptor_differs(path, *a, **kw):  # noqa: ANN001
+        st = real_stat(path, *a, **kw)
+        # Only the POST-OPEN stat — the one taken on the file descriptor,
+        # an int — reports a different identity. Path stats stay truthful,
+        # so pathlib's own is_file() is untouched and the test isolates
+        # exactly the check-then-open window.
+        if not isinstance(path, int):
+            return st
+
+        class _Faked:
+            st_ino = (st.st_ino or 0) + 999
+            st_dev = st.st_dev
+            st_size = st.st_size
+            st_mode = st.st_mode
+        return _Faked()
+
+    with patch("critic_orchestrator.agentic_api.os.stat",
+               _stat_where_the_descriptor_differs):
+        out = _run_tool("fs_read", {"path": "m.py"}, tmp_path)
+    assert "legit" not in out, "content was served despite an identity change"
+    assert "error" in out.lower()
+
+
 def test_symlink_escape_is_refused(tmp_path: Path) -> None:
     secret = tmp_path.parent / "secret.txt"
     secret.write_text("SECRET\n")

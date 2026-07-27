@@ -307,12 +307,16 @@ def make_backend_from_env() -> Any | None:
                 return default
 
         temp_raw = (os.environ.get("CRITIC_TEMPERATURE") or "").strip()
+        stream_raw = (os.environ.get("CRITIC_STREAM") or "").strip().lower()
         return AgenticApiBackend(
             base_url=base, api_key=key, model=model,
             max_steps=_int_env("CRITIC_MAX_STEPS", DEFAULT_MAX_STEPS),
             read_budget_bytes=_int_env("CRITIC_READ_BUDGET_BYTES",
                                         DEFAULT_READ_BUDGET_BYTES),
             temperature=float(temp_raw) if temp_raw else None,
+            # CRITIC_STREAM=1 keeps a long reasoning request from sitting
+            # silent long enough for an intermediary to reset it.
+            stream=stream_raw in ("1", "true", "yes", "on"),
         )
     if kind in ("openai_compat", "openai", "deepseek", "kimi", "moonshot",
                 "openrouter", "together", "groq", "local"):
