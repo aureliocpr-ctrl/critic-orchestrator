@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import re
 
-from .orchestrator import WorkerSpec
+from .orchestrator import ExecRequest, WorkerSpec
 
 
 _MAX_USER_FIELD_CHARS: int = 4096
@@ -276,6 +276,10 @@ be ONLY the JSON object; no surrounding prose.
         # anything if it actually ran the test, so a backend that cannot
         # execute must skip it rather than let it reason to a conclusion.
         needs=frozenset({"read", "exec"}),
+        # For API backends: the pinned experiment an ExecPolicy can turn
+        # into a no-argument tool. CLI backends ignore this and run the
+        # stash procedure from the prompt with their own Bash.
+        exec_request=ExecRequest(selector=test_path),
     )
 
 

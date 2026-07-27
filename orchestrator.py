@@ -75,6 +75,28 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
 
 
 @dataclass(frozen=True)
+class ExecRequest:
+    """A CALLER-declared request for pinned execution.
+
+    This is data, not capability: carrying one grants nothing. A backend
+    that can execute turns it into a no-argument tool via `pinned_exec`
+    under its `ExecPolicy`; every other backend ignores it. It exists as
+    a structured field because the prompt was the only carrier of the
+    test path before, and a prompt cannot be validated while a field can.
+    """
+
+    #: pytest selector (path or nodeid), validated by `build_pinned_pytest`
+    #: at grant time — a malformed one refuses the grant, never runs.
+    selector: str
+    #: The commit meant as "pre-fix". HEAD~1 matches the convention this
+    #: package already imposes (commit the fix+test, then review); a fix
+    #: spread over several commits needs the caller to name the baseline.
+    baseline_ref: str = "HEAD~1"
+    #: Per-run timeout for each of the two test executions.
+    timeout_s: int = 120
+
+
+@dataclass(frozen=True)
 class WorkerSpec:
     """Recipe for a single adversarial worker."""
 
@@ -107,6 +129,11 @@ class WorkerSpec:
     # observation behind it. A backend must refuse any worker whose needs
     # exceed what it can offer.
     needs: frozenset[str] = frozenset({"read"})
+    # The pinned-execution request for workers that need "exec" on an
+    # API backend (see ExecRequest). None on every other worker. The
+    # CLI backends ignore it — they run the procedure from the prompt
+    # with their own Bash.
+    exec_request: ExecRequest | None = None
 
 
 @dataclass

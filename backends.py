@@ -282,6 +282,7 @@ def make_backend_from_env() -> Any | None:
             DEFAULT_READ_BUDGET_BYTES,
             AgenticApiBackend,
         )
+        from .exec_policy import policy_from_env
         key = (os.environ.get("CRITIC_API_KEY")
                or os.environ.get("OPENAI_API_KEY") or "").strip()
         base = (os.environ.get("CRITIC_BASE_URL")
@@ -317,6 +318,11 @@ def make_backend_from_env() -> Any | None:
             # CRITIC_STREAM=1 keeps a long reasoning request from sitting
             # silent long enough for an intermediary to reset it.
             stream=stream_raw in ("1", "true", "yes", "on"),
+            # Execution stays OFF unless the operator set
+            # CRITIC_ALLOW_EXEC=1 + CRITIC_EXEC_ROOTS; the policy travels
+            # on the backend so the grant is decided per project_dir at
+            # run time, with the denial reason surfaced in the skip.
+            exec_policy=policy_from_env(),
         )
     if kind in ("openai_compat", "openai", "deepseek", "kimi", "moonshot",
                 "openrouter", "together", "groq", "local"):

@@ -128,8 +128,8 @@ def _run_git(args: list[str], cwd: Path, what: str) -> str:
 
 
 @contextmanager
-def ephemeral_worktree(repo: Path) -> Iterator[Path]:
-    """A throwaway checkout of `repo` at its current HEAD.
+def ephemeral_worktree(repo: Path, ref: str = "HEAD") -> Iterator[Path]:
+    """A throwaway checkout of `repo` at `ref` (default: current HEAD).
 
     Deliberately NOT `git stash`: stash mutates the caller's working tree
     and is not idempotent, and it has already moved a user's uncommitted
@@ -143,7 +143,8 @@ def ephemeral_worktree(repo: Path) -> Iterator[Path]:
     repo = Path(repo).resolve()
     if not (repo / ".git").exists():
         raise PinnedExecError(f"not a git repository: {repo}")
-    head = _run_git(["rev-parse", "HEAD"], repo, "resolving HEAD")
+    head = _run_git(["rev-parse", "--verify", f"{ref}^{{commit}}"],
+                    repo, f"resolving {ref}")
     target = Path(tempfile.mkdtemp(prefix="critic-wt-"))
     # mkdtemp created it; `git worktree add` wants to create it itself.
     shutil.rmtree(target, ignore_errors=True)
@@ -241,11 +242,99 @@ def run_pinned(
 run_pinned.MAX_OUTPUT_CHARS = 20_000  # type: ignore[attr-defined]
 
 
+@dataclass
+class FalsificationProbe:
+    """Both halves of the falsification experiment, as observed facts.
+
+    No verdict field on purpose: whether `pre` failing FOR THE RIGHT
+    REASON (the pinned assertion, not an ImportError) is what a model is
+    for. This object only reports what happened.
+    """
+
+    #: The test run at HEAD (fix present). Expected to pass.
+    post: PinnedResult
+    #: The test run at the baseline with ONLY the test file taken from
+    #: HEAD (fix absent, test present). Expected to fail.
+    pre: PinnedResult
+    head: str
+    baseline: str
+    selector: str
+    test_file: str
+
+
+def run_falsification_probe(
+    repo: Path,
+    selector: str,
+    *,
+    baseline_ref: str = "HEAD~1",
+    timeout_s: int = 120,
+) -> FalsificationProbe:
+    """Run the pre/post falsification experiment, decided entirely by code.
+
+    POST: worktree at HEAD, run `selector`.
+    PRE:  worktree at `baseline_ref`, then `git checkout HEAD -- <test
+    file>` inside it so the regression test exists while the fix does
+    not, then run `selector`.
+
+    Taking the TEST to the baseline (rather than reverting the fix at
+    HEAD) needs no knowledge of which files the fix touched — the
+    selector, which the caller already supplies, is enough. The cost is
+    an assumption, stated rather than hidden: "pre-fix" is `baseline_ref`
+    (default HEAD~1, matching this package's commit-then-review
+    convention). A fix spread across several commits needs the caller to
+    name the baseline; this function cannot detect that for them.
+
+    Runs with OUR interpreter (`sys.executable -m pytest`): the probe is
+    for repositories whose tests run in the environment the operator
+    mounted this server in. A missing dependency shows up as the test
+    erroring identically on BOTH sides, which a reader can see.
+    """
+    repo = Path(repo).resolve()
+    cmd = build_pinned_pytest(selector)
+    sel_norm = selector.strip().replace("\\", "/")
+    test_file = sel_norm.split("::", 1)[0]
+    if not (repo / ".git").exists():
+        raise PinnedExecError(f"not a git repository: {repo}")
+    head = _run_git(["rev-parse", "HEAD"], repo, "resolving HEAD")
+    try:
+        baseline = _run_git(
+            ["rev-parse", "--verify", f"{baseline_ref}^{{commit}}"],
+            repo, f"resolving {baseline_ref}")
+    except PinnedExecError as exc:
+        raise PinnedExecError(
+            f"baseline {baseline_ref!r} does not exist in {repo} "
+            f"(a single-commit repository has no pre-fix state to "
+            f"compare against): {exc}"
+        ) from exc
+    if head == baseline:
+        raise PinnedExecError(
+            f"baseline {baseline_ref!r} resolves to HEAD itself — the "
+            "experiment would compare a commit against itself and prove "
+            "nothing")
+
+    with ephemeral_worktree(repo) as wt_post:
+        post = run_pinned(cmd, wt_post, timeout_s=timeout_s,
+                          require_worktree=True)
+    with ephemeral_worktree(repo, ref=baseline_ref) as wt_pre:
+        # Bring ONLY the regression test forward to HEAD. If the file is
+        # identical on both commits this is a no-op, which is fine.
+        _run_git(["checkout", head, "--", test_file], wt_pre,
+                 f"taking {test_file} from HEAD into the baseline worktree")
+        pre = run_pinned(cmd, wt_pre, timeout_s=timeout_s,
+                         require_worktree=True)
+    return FalsificationProbe(
+        post=post, pre=pre, head=head, baseline=baseline,
+        selector=sel_norm, test_file=test_file,
+    )
+
+
 __all__ = [
+    "FalsificationProbe",
     "PinnedCommand",
     "PinnedExecError",
     "PinnedResult",
     "build_pinned_pytest",
     "ephemeral_worktree",
+    "run_falsification_probe",
     "run_pinned",
 ]
