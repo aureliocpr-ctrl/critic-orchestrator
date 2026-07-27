@@ -17,6 +17,54 @@ from unittest.mock import MagicMock
 import pytest
 
 from critic_orchestrator.job_registry import JOB_TTL_S, Job, JobRegistry
+
+
+class _FakeReport:
+    def as_dict(self) -> dict:
+        return {"ok": True}
+
+
+@pytest.mark.parametrize("transition", ["done", "failed", "cancelled"])
+def test_every_terminal_transition_sweeps_expired_jobs(
+    tmp_path, transition: str,
+) -> None:
+    """GC ran on create/get/list and (after an earlier fix) on done and
+    failed — but NOT on cancelled, the one terminal transition a caller
+    reaches without polling afterwards. An independent model flagged
+    idle-server retention; the real defect under that flag was this
+    inconsistency.
+
+    TWO TEST BUGS FOUND WRITING THIS, both of which made it pass without
+    the fix:
+      1. creating the second job AFTER expiring the first let `create`'s
+         own sweep remove it;
+      2. `ttl_s=0.0` expires a job the instant it turns terminal, so the
+         sweep inside `mark_failed` removed `old` before the transition
+         under test ever ran.
+    Hence: a real TTL, both jobs up front, and an asserted pre-condition
+    — so the only thing that can remove `old` is the transition tested.
+    """
+    ttl = 0.05
+    reg = JobRegistry(ttl_s=ttl)
+    old = reg.create(claim="old", project_dir=tmp_path,
+                     workers=[], timeout_s=30)
+    fresh = reg.create(claim="fresh", project_dir=tmp_path,
+                       workers=[], timeout_s=30)
+    reg.mark_failed(old, "boom")
+    # Pre-condition: terminal but still held — its age has not passed TTL.
+    assert old.id in reg._jobs, "setup broken: old was already swept"
+    time.sleep(ttl * 3)
+
+    if transition == "done":
+        reg.mark_done(fresh, _FakeReport())
+    elif transition == "failed":
+        reg.mark_failed(fresh, "boom")
+    else:
+        reg.mark_cancelled(fresh)
+
+    assert old.id not in reg._jobs, (
+        f"mark_{transition} did not sweep an expired job"
+    )
 from critic_orchestrator.orchestrator import CriticReport, WorkerSpec
 
 

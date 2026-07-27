@@ -50,6 +50,40 @@
 - pyproject version intentionally NOT bumped: committed, not released —
   features accumulate to one tag.
 
+### Added — `agentic_api`: every reviewer, on any tool-calling provider
+- `agentic_api.py` + `CRITIC_BACKEND=agentic_api` — an agent loop over the
+  same OpenAI-compatible endpoints, with read-only sandboxed `fs_read /
+  fs_list / fs_glob / fs_grep`, so the design lenses run on Kimi, GLM,
+  DeepSeek and friends. `urllib` only, no new dependency, and no dependency
+  on any external coding-agent CLI (this package must stay usable by
+  someone who has none).
+- **Capability model.** `WorkerSpec.needs` (`read` / `exec`) vs a backend's
+  `capabilities`; needs beyond the offer means SKIPPED before any request.
+  Necessary because `requires_execution` could not tell
+  `caller_verification` (grep is its whole method) from `falsification`
+  (whose method IS `git stash` + run the test) — the latter, left running
+  on a read-only sandbox, would have reasoned its way to
+  `test_falsifies_master: true` having executed nothing.
+- **Convergence.** A step trace in `raw_preview` on every error path, a
+  wind-down notice two steps from the end, and `tool_choice:
+  submit_verdict` forced on the final step (retried without it on
+  providers that reject it).
+- Live: **DeepSeek PASS** (5 findings, 133 s) · **GLM 4.6 PASS** after the
+  convergence fix (2 findings, 186 s; it had burned all 14 steps without
+  submitting) · Kimi k3 `ConnectionResetError` — transport, reported
+  without a fabricated verdict. Backend table in the README: agentic_api
+  is 2 of 3 on the post-fix triad, 3 of 3 on the design lenses.
+- Independent models earned their keep immediately: DeepSeek found a
+  **critical, true** defect in this repo's own cancellation path (see
+  Fixed), and GLM's flag on TTL retention exposed a real inconsistency
+  (`mark_cancelled` was the only terminal transition without a sweep —
+  and the one a caller reaches without polling afterwards). GLM's second
+  finding was FALSE (it claimed no explicit registry reset in tests;
+  four exist) — it had been shown one file, the blind-judge failure mode.
+- Endpoint construction no longer invents a version segment: GLM lives
+  under `/api/paas/v4` and an unconditional `/v1` produced
+  `/v4/v1/chat/completions` and a live 404. Eight parametrised cases.
+
 ### Fixed — found by turning this tool's own three lenses on itself
 - **`design_review()` had zero call sites** (product and tests): dead code, the
   built-never-wired class this tool's grid leads with. Now the verified

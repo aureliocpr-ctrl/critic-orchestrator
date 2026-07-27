@@ -161,6 +161,11 @@ class JobRegistry:
                 return
             job.status = "cancelled"
             job.ended_at = time.time()
+            # Sweep here too. This was the one terminal transition without
+            # it, and it is precisely the one a caller reaches WITHOUT
+            # polling afterwards (you cancel and walk away), so nothing
+            # else would trigger a sweep on an otherwise idle server.
+            self._gc_expired_locked()
 
     def cancel(self, job_id: str) -> int:
         """Cancel a running job. Returns number of worker subprocesses
