@@ -332,3 +332,58 @@ def test_make_backend_ghost_cli_rejects_non_windows(
     monkeypatch.setattr(ghost_backend, "_IS_WINDOWS", False)
     with pytest.raises(ValueError, match="Windows-only"):
         make_backend_from_env()
+
+
+# --------------------------------------------------------------------------
+# Cancellation — the third built-never-wired: _run_via_backend probes for
+# cancel_check support, and this backend never declared it, so cancelling
+# a ghost review let the sister run to its full timeout.
+# --------------------------------------------------------------------------
+
+def test_preflight_cancel_spawns_no_sister(tmp_path: Path) -> None:
+    """A review cancelled before this worker started must not pay for a
+    sister boot at all."""
+    spawned = {"n": 0}
+
+    def _factory(**_kw):
+        spawned["n"] += 1
+        return FakeSession(response=None)
+
+    be = GhostCLIBackend(model="opus", session_factory=_factory,
+                         work_dir=tmp_path, poll_interval_s=0.01)
+    res = be.run_worker(_spec(), tmp_path, timeout=5,
+                        cancel_check=lambda: True)
+    assert res.verdict is None
+    assert "cancel" in (res.error or "").lower()
+    assert spawned["n"] == 0, "a sister was spawned for a cancelled review"
+
+
+def test_cancel_mid_poll_stops_the_wait_and_kills_the_sister(
+        tmp_path: Path) -> None:
+    """Cancellation during the response poll must end the wait promptly
+    and close (kill) the sister — not sleep out the whole timeout."""
+    session = FakeSession(response=None)  # never writes the response file
+    be = _backend(session, tmp_path)
+    calls = {"n": 0}
+
+    def _cc() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 3
+
+    t0 = time.time()
+    res = be.run_worker(_spec(), tmp_path, timeout=30, cancel_check=_cc)
+    took = time.time() - t0
+    assert res.verdict is None
+    assert "cancel" in (res.error or "").lower()
+    assert session.closed, "the sister was left alive after cancellation"
+    assert took < 5, f"cancel took {took:.1f}s — it waited instead of stopping"
+
+
+def test_ghost_backend_advertises_cancel_support() -> None:
+    """The orchestrator only forwards cancel_check to backends whose
+    run_worker signature accepts it — the probe must see it here."""
+    from critic_orchestrator.orchestrator import _backend_accepts_cancel
+    be = GhostCLIBackend(model="opus",
+                         session_factory=lambda **_kw: FakeSession(),
+                         poll_interval_s=0.01)
+    assert _backend_accepts_cancel(be) is True

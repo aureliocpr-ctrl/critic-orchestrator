@@ -36,10 +36,13 @@ Lifecycle hardening:
     instead of silently filling the machine with hidden consoles.
 
 Limits (honest): Windows-only (Win32 console API via the `clp` arsenal
-CLI, which must be on PATH). Job cancellation cannot reach a sister
-mid-flight — the worker ends at its timeout, and `close()`/atexit kill
-the tree. Cost is reported as 0.0 because the whole point is flat
-subscription usage; wall time is the real spend.
+CLI, which must be on PATH). Cancellation reaches the sister at the
+response-poll granularity (`poll_interval_s`): the poll notices the
+cancel, the `finally` kills the process tree. The one blind window is
+the boot itself (`_wait_ready`, bounded by `boot_timeout_s`) — a cancel
+arriving mid-boot takes effect right after it. Cost is reported as 0.0
+because the whole point is flat subscription usage; wall time is the
+real spend.
 """
 from __future__ import annotations
 
@@ -342,11 +345,22 @@ class GhostCLIBackend:
 
     # -- response polling -----------------------------------------------------
 
-    def _await_response(self, path: Path, timeout: int) -> tuple[dict | None, str | None, str]:
-        """Poll for the response file. Returns (verdict, error, raw_preview)."""
+    def _await_response(
+        self, path: Path, timeout: int,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> tuple[dict | None, str | None, str]:
+        """Poll for the response file. Returns (verdict, error, raw_preview).
+
+        `cancel_check` is consulted every poll tick: an aborted review
+        must stop WAITING, not sleep out its timeout — the caller's
+        `finally` then kills the sister, so the cancellation is real.
+        """
         deadline = time.time() + timeout
         raw = ""
         while time.time() < deadline:
+            if cancel_check is not None and cancel_check():
+                return None, ("cancelled during response wait — the ghost "
+                              "sister is being killed"), raw[:500]
             if path.exists():
                 try:
                     raw = path.read_text(encoding="utf-8").strip()
@@ -390,7 +404,14 @@ class GhostCLIBackend:
     # -- main entry -----------------------------------------------------------
 
     def run_worker(self, spec: WorkerSpec, project_dir: Path,
-                   timeout: int) -> BackendResult:
+                   timeout: int, *,
+                   cancel_check: Callable[[], bool] | None = None,
+                   ) -> BackendResult:
+        # Pre-flight: a review cancelled before this worker started must
+        # not pay for a sister boot (~up to boot_timeout_s of wall time).
+        if cancel_check is not None and cancel_check():
+            return BackendResult(
+                None, "cancelled before the ghost sister was spawned")
         self._work_dir.mkdir(parents=True, exist_ok=True)
         stamp = f"{int(time.time() * 1000):x}_{next(_STAMP)}"
         prompt_path = self._work_dir / f"{spec.name}_{stamp}_prompt.md"
@@ -406,6 +427,11 @@ class GhostCLIBackend:
                 session.start()
             except Exception as exc:
                 return BackendResult(None, f"ghost session failed: {exc}")
+            # A cancel that arrived during the boot takes effect here,
+            # before the prompt is sent: the sister dies in the finally.
+            if cancel_check is not None and cancel_check():
+                return BackendResult(
+                    None, "cancelled during sister boot — killing it")
             try:
                 sent = session.send_prompt_file(prompt_path, marker)
             except Exception as exc:
@@ -414,8 +440,8 @@ class GhostCLIBackend:
                 return BackendResult(
                     None, "ghost inject failed (ai-eye did not verify the "
                           "marker in the console buffer)")
-            verdict, error, preview = self._await_response(response_path,
-                                                           timeout)
+            verdict, error, preview = self._await_response(
+                response_path, timeout, cancel_check)
             return BackendResult(verdict, error, 0.0, preview)
         finally:
             session.close()

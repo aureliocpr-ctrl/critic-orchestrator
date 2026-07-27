@@ -1151,3 +1151,47 @@ def test_api_key_never_appears_in_an_error(tmp_path: Path) -> None:
             _spec(), tmp_path, 60)
     assert "SUPERSECRET" not in (res.error or "")
     assert "SUPERSECRET" not in (res.raw_preview or "")
+
+
+# ---------------------------------------------------------------------------
+# fs_grep must stream, never slurp — found live: a grep over a directory
+# containing session logs died with MemoryError, because read_text loads
+# the WHOLE file and a jsonl log can be one multi-hundred-MB line.
+# ---------------------------------------------------------------------------
+
+def test_fs_grep_does_not_scan_past_the_per_file_cap(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from critic_orchestrator import agentic_api as aa
+    monkeypatch.setattr(aa, "_MAX_GREP_FILE_BYTES", 5_000)
+    big = tmp_path / "big.log"
+    big.write_text("x" * 6_000 + "\nNEEDLE_PAST_CAP\n", encoding="utf-8")
+    small = tmp_path / "small.py"
+    small.write_text("ok\nNEEDLE_IN_SMALL = 1\n", encoding="utf-8")
+    out = _run_tool("fs_grep", {"pattern": "NEEDLE_"}, tmp_path, "n0nce")
+    assert "NEEDLE_IN_SMALL" in out
+    assert "NEEDLE_PAST_CAP" not in out, (
+        "the file was read past the per-file cap")
+    assert "partially scanned" in out, (
+        "silent truncation: the model cannot know coverage was partial")
+
+
+def test_fs_grep_survives_a_single_giant_line(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One line, no newline, bigger than the line cap — the jsonl shape
+    that produced the live MemoryError. Must stay bounded AND still match
+    within the first chunk."""
+    from critic_orchestrator import agentic_api as aa
+    monkeypatch.setattr(aa, "_MAX_GREP_LINE_BYTES", 1_000)
+    monkeypatch.setattr(aa, "_MAX_GREP_FILE_BYTES", 10_000)
+    giant = tmp_path / "one_line.jsonl"
+    giant.write_text("HEAD_MARKER " + "y" * 50_000, encoding="utf-8")
+    out = _run_tool("fs_grep", {"pattern": "HEAD_MARKER"}, tmp_path, "n0nce")
+    assert "one_line.jsonl:1:" in out
+
+
+def test_fs_grep_line_numbers_stay_exact_for_normal_files(
+        tmp_path: Path) -> None:
+    p = tmp_path / "mod.py"
+    p.write_text("a = 1\nb = 2\ntarget = 3\n", encoding="utf-8")
+    out = _run_tool("fs_grep", {"pattern": "target"}, tmp_path, "n0nce")
+    assert "mod.py:3:" in out

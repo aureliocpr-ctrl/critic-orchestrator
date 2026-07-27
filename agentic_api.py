@@ -71,6 +71,13 @@ DEFAULT_MAX_STEPS: int = 24
 MAX_GREP_MATCHES: int = 200
 MAX_LIST_ENTRIES: int = 400
 MAX_GLOB_MATCHES: int = 400
+#: fs_grep is STREAMED with these caps. It used to read_text whole
+#: files, and died live with MemoryError on a directory whose session
+#: logs are single multi-hundred-MB jsonl lines. Caps are generous for
+#: source code (no real source line approaches 64 KB) and exist so a
+#: log file cannot take the sandbox down.
+_MAX_GREP_FILE_BYTES: int = 2_000_000
+_MAX_GREP_LINE_BYTES: int = 64_000
 
 _SKIP_DIRS: frozenset[str] = frozenset({
     ".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache",
@@ -324,6 +331,39 @@ def _tool_fs_glob(args: dict, root: Path, nonce: str = "") -> str:
     return _frame("GLOB_RESULT", f"pattern={pattern}", body, nonce)
 
 
+def _grep_stream(p: Path, rx: "re.Pattern[str]", rel: str,
+                 hits: list[str]) -> bool:
+    """Scan one file line-wise under the byte caps. Returns True iff the
+    file was FULLY scanned.
+
+    `readline(cap)` bounds memory per read even when the file is one
+    giant line (the shape that produced the live MemoryError): an
+    over-long line arrives in chunks that share a line number. The known
+    cost, stated: a match straddling a chunk boundary of a >64 KB line
+    is missed — no source line is that long; log lines can be, and a
+    partial scan of those beats an OOM'd sandbox.
+    """
+    consumed = 0
+    lineno = 0
+    mid_line = False
+    with open(p, encoding="utf-8", errors="replace") as fh:
+        while consumed < _MAX_GREP_FILE_BYTES:
+            chunk = fh.readline(_MAX_GREP_LINE_BYTES)
+            if not chunk:
+                return True
+            consumed += len(chunk)
+            if not mid_line:
+                lineno += 1
+            complete = chunk.endswith("\n")
+            piece = chunk.rstrip("\n")
+            if piece and rx.search(piece):
+                hits.append(f"{rel}:{lineno}: {piece.strip()[:200]}")
+                if len(hits) > MAX_GREP_MATCHES:
+                    return True
+            mid_line = not complete
+    return False
+
+
 def _tool_fs_grep(args: dict, root: Path, nonce: str = "") -> str:
     pattern = str(args.get("pattern", ""))
     if not pattern:
@@ -335,26 +375,33 @@ def _tool_fs_grep(args: dict, root: Path, nonce: str = "") -> str:
     glob = str(args.get("glob", "") or "").strip().replace("\\", "/")
     root_real = Path(root).resolve()
     hits: list[str] = []
+    partially_scanned: list[str] = []
     for p in _iter_repo_files(root_real):
         rel = _rel(root_real, p)
         if glob and not (fnmatch.fnmatch(rel, glob)
                           or fnmatch.fnmatch(p.name, glob)):
             continue
         try:
-            text = p.read_text(encoding="utf-8", errors="replace")
+            fully = _grep_stream(p, rx, rel, hits)
         except OSError:
             continue
-        for i, line in enumerate(text.splitlines(), start=1):
-            if rx.search(line):
-                hits.append(f"{rel}:{i}: {line.strip()[:200]}")
-                if len(hits) > MAX_GREP_MATCHES:
-                    break
+        if not fully:
+            partially_scanned.append(rel)
         if len(hits) > MAX_GREP_MATCHES:
             break
     cut = len(hits) > MAX_GREP_MATCHES
     body = "\n".join(hits[:MAX_GREP_MATCHES]) or "(no match)"
     if cut:
         body += f"\n… [truncated at {MAX_GREP_MATCHES} matches]"
+    if partially_scanned:
+        shown = ", ".join(partially_scanned[:5])
+        more = (f" and {len(partially_scanned) - 5} more"
+                if len(partially_scanned) > 5 else "")
+        body += (
+            f"\n… [{len(partially_scanned)} file(s) partially scanned "
+            f"(over {_MAX_GREP_FILE_BYTES} bytes): {shown}{more} — "
+            "matches beyond the cap are not reported]"
+        )
     return _frame("GREP_RESULT", f"pattern={pattern}", body, nonce)
 
 
