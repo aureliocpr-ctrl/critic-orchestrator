@@ -42,10 +42,21 @@ honest, while guessing arguments would manufacture failures.
 from __future__ import annotations
 
 import re
+import shlex
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from .exec_policy import ExecPolicy
+from .pinned_exec import (
+    PinnedCommand,
+    PinnedExecError,
+    ephemeral_worktree,
+    run_pinned,
+    worktree_pythonpath_env,
+)
 
 #: Fences whose content is shell. A ```python fence is not a promise a
 #: user types into a terminal.
@@ -90,6 +101,14 @@ _REFUSED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bgit\s+(?:push|clone|remote|fetch|pull)\b",
         r"\bdocker\b", r"\bpodman\b", r"\bkubectl\b", r"\bterraform\b",
         r"\btwine\b", r"\bsetx\b", r"\bexport\b", r"\bchmod\b", r"\bchown\b",
+        # Shell REINTRODUCTION: this probe's whole defence is argv-only
+        # execution, and `powershell -c` / `cmd /c` / `bash -c` hand the
+        # attacker a shell back through a single argv element. Interpreter
+        # front-doors (env, xargs, eval, start) fall in the same class.
+        r"\bpowershell\b", r"\bpwsh\b", r"\bcmd\b", r"\bcommand\b",
+        r"\bbash\b", r"\bsh\b", r"\bzsh\b", r"\bfish\b", r"\bksh\b",
+        r"\benv\b", r"\bxargs\b", r"\beval\b", r"\bexec\b", r"\bstart\b",
+        r"\bformat\b", r"\bfdisk\b", r"\bmount\b",
         r"[|>]", r"&&", r";", r"`", r"\$\(",
     )
 )
@@ -337,9 +356,136 @@ def probe_report(
     return report
 
 
+# ---------------------------------------------------------------------------
+# Execution — the consumer the extraction never had
+# ---------------------------------------------------------------------------
+
+#: Grace/timeout default per promise. A --help returns in a second; a
+#: documented test command can take minutes, which is what the tool
+#: parameter is for.
+DEFAULT_PROMISE_TIMEOUT_S: int = 30
+
+#: Output kept per outcome (probe_report clips again for the row).
+_MAX_OUTCOME_OUTPUT_CHARS: int = 4_000
+
+
+def _promise_argv(command: str) -> list[str]:
+    """Turn a documented command into argv, or raise PinnedExecError.
+
+    `python` maps to OUR interpreter: the promise is "this works in the
+    environment the operator mounted this server in", and a bare
+    `python` on PATH may be a different install or absent on Windows.
+    """
+    argv = shlex.split(command)
+    if not argv:
+        raise PinnedExecError("empty command")
+    if argv[0] in ("python", "python3", "py"):
+        argv[0] = sys.executable
+    return argv
+
+
+def run_promise(
+    promise: Promise, cwd: Path, *,
+    timeout_s: int = DEFAULT_PROMISE_TIMEOUT_S,
+    require_worktree: bool = False,
+) -> dict[str, Any]:
+    """Execute ONE promise in `cwd`. Never raises: every failure mode is
+    an outcome row the report can score.
+
+    Re-checks `_is_refused` even though extraction already did: two
+    independent layers fail differently, and a hand-built or upstream-
+    buggy Promise must not become the day the probe ran `powershell -c`.
+    """
+    base: dict[str, Any] = {"command": promise.command}
+    if _is_refused(promise.command):
+        return {**base, "exit_code": -1, "timed_out": False,
+                "output": "refused: this command is never executed "
+                          "(shell, network, destructive, or setup)"}
+    try:
+        argv = _promise_argv(promise.command)
+    except (PinnedExecError, ValueError) as exc:
+        return {**base, "exit_code": -1, "timed_out": False,
+                "output": f"refused: unparseable command ({exc})"}
+    cmd = PinnedCommand(argv=argv, label=promise.command)
+    try:
+        res = run_pinned(cmd, cwd, timeout_s=timeout_s,
+                         require_worktree=require_worktree,
+                         extra_env=worktree_pythonpath_env(Path(cwd)))
+    except PinnedExecError as exc:
+        # run_pinned raises on spawn failure; "no such executable" is the
+        # report's 127 contract (a promised entry point that does not
+        # exist), everything else is an honest error row.
+        msg = str(exc)
+        code = 127 if ("could not start" in msg or "not found" in msg) \
+            else -1
+        return {**base, "exit_code": code, "timed_out": False,
+                "output": msg[:_MAX_OUTCOME_OUTPUT_CHARS]}
+    combined = res.stdout or ""
+    if res.stderr:
+        combined += ("\n[stderr]\n" + res.stderr)
+    return {
+        **base,
+        "exit_code": res.exit_code,
+        "timed_out": res.timed_out,
+        "duration_s": res.duration_s,
+        "output": combined[:_MAX_OUTCOME_OUTPUT_CHARS],
+    }
+
+
+@dataclass
+class ProductProbeReport:
+    """probe_report's dict behind the .as_dict() the job registry wants."""
+
+    data: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.data
+
+
+def run_product_probe(
+    project_dir: Path | str, *,
+    policy: ExecPolicy,
+    cap: int = DEFAULT_PROMISE_CAP,
+    per_promise_timeout_s: int = DEFAULT_PROMISE_TIMEOUT_S,
+    cancel_check: Callable[[], bool] | None = None,
+) -> ProductProbeReport:
+    """Extract the promises at HEAD and run each one in a worktree.
+
+    Policy FIRST (raises ExecPolicyError with the operator knobs named),
+    then one ephemeral worktree for the whole run: promises are read
+    from the worktree too, so an uncommitted README line is not a
+    promise yet and the probe's contract is "what HEAD ships", the same
+    commit a user would get.
+
+    `cancel_check` is consulted between promises; a cancelled probe
+    reports what it ran, marks the rest not_run, and says `cancelled`.
+    """
+    repo = policy.check(project_dir)
+    with ephemeral_worktree(repo) as wt:
+        promises = extract_promises(wt, cap=cap)
+        truncated = len(extract_promises(wt, cap=cap + 1)) > len(promises)
+        outcomes: list[dict[str, Any]] = []
+        cancelled = False
+        for p in promises:
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                break
+            outcomes.append(run_promise(p, wt,
+                                        timeout_s=per_promise_timeout_s,
+                                        require_worktree=True))
+    report = probe_report(repo, promises, outcomes, truncated=truncated)
+    if cancelled:
+        report["cancelled"] = True
+    return ProductProbeReport(report)
+
+
 __all__ = [
     "DEFAULT_PROMISE_CAP",
+    "DEFAULT_PROMISE_TIMEOUT_S",
+    "ProductProbeReport",
     "Promise",
     "extract_promises",
     "probe_report",
+    "run_product_probe",
+    "run_promise",
 ]

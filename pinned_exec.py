@@ -255,6 +255,26 @@ def run_pinned(
 run_pinned.MAX_OUTPUT_CHARS = 20_000  # type: ignore[attr-defined]
 
 
+def worktree_pythonpath_env(wt: Path) -> dict[str, str]:
+    """The PYTHONPATH overlay that makes a worktree win the import.
+
+    [container, worktree, worktree/src] ahead of the inherited value:
+    container covers a flat package named after the repo directory,
+    the worktree covers in-repo packages, src/ covers src-layout —
+    and PYTHONPATH entries precede site-packages, where both editable
+    mechanisms resolve. Shared by the falsification probe and the
+    product probe; anything executing code IN a worktree needs this or
+    it silently executes the real (post-fix) tree instead.
+    """
+    parts = [str(wt.parent), str(wt)]
+    if (wt / "src").is_dir():
+        parts.append(str(wt / "src"))
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        parts.append(existing)
+    return {"PYTHONPATH": os.pathsep.join(parts)}
+
+
 @dataclass
 class FalsificationProbe:
     """Both halves of the falsification experiment, as observed facts.
@@ -337,19 +357,10 @@ def run_falsification_probe(
             "experiment would compare a commit against itself and prove "
             "nothing")
 
-    def _worktree_env(wt: Path) -> dict[str, str]:
-        parts = [str(wt.parent), str(wt)]
-        if (wt / "src").is_dir():
-            parts.append(str(wt / "src"))
-        existing = os.environ.get("PYTHONPATH")
-        if existing:
-            parts.append(existing)
-        return {"PYTHONPATH": os.pathsep.join(parts)}
-
     with ephemeral_worktree(repo) as wt_post:
         post = run_pinned(cmd, wt_post, timeout_s=timeout_s,
                           require_worktree=True,
-                          extra_env=_worktree_env(wt_post))
+                          extra_env=worktree_pythonpath_env(wt_post))
     with ephemeral_worktree(repo, ref=baseline_ref) as wt_pre:
         # Bring ONLY the regression test forward to HEAD. If the file is
         # identical on both commits this is a no-op, which is fine.
@@ -357,7 +368,7 @@ def run_falsification_probe(
                  f"taking {test_file} from HEAD into the baseline worktree")
         pre = run_pinned(cmd, wt_pre, timeout_s=timeout_s,
                          require_worktree=True,
-                         extra_env=_worktree_env(wt_pre))
+                         extra_env=worktree_pythonpath_env(wt_pre))
     return FalsificationProbe(
         post=post, pre=pre, head=head, baseline=baseline,
         selector=sel_norm, test_file=test_file,
@@ -373,4 +384,5 @@ __all__ = [
     "ephemeral_worktree",
     "run_falsification_probe",
     "run_pinned",
+    "worktree_pythonpath_env",
 ]

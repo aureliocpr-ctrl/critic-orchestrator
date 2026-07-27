@@ -314,6 +314,57 @@ def _list_reviews_tool() -> t.Tool:
     )
 
 
+def _product_probe_tool() -> t.Tool:
+    return t.Tool(
+        name="start_product_probe",
+        description=(
+            "Run the PROMISES, not just the author's tests: extract the "
+            "commands the artifact tells a user to type (shell fences in "
+            "README/USAGE/QUICKSTART/docs, [project.scripts] entry "
+            "points, python -m targets) at HEAD, execute each one in an "
+            "ephemeral git worktree (argv only, no shell; setup/network/"
+            "destructive/shell-reintroducing commands are never "
+            "executed), and score kept vs broken — a server keeps its "
+            "promise by staying up through the grace period. Requires "
+            "the operator opt-in: CRITIC_ALLOW_EXEC=1 and the repository "
+            "under a CRITIC_EXEC_ROOTS entry; refused immediately (with "
+            "the knobs named) otherwise. Async: returns a job_id — poll "
+            "with poll_adversarial_review, cancel with "
+            "cancel_adversarial_review."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_dir": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the git repository to probe. "
+                        "Defaults to $PWD. Must lie under an operator-"
+                        "configured execution root."
+                    ),
+                },
+                "per_promise_timeout_s": {
+                    "type": "integer",
+                    "minimum": 5, "maximum": 600, "default": 30,
+                    "description": (
+                        "Timeout per promise. Doubles as the grace "
+                        "period for documented servers (still up at the "
+                        "deadline = promise kept)."
+                    ),
+                },
+                "promise_cap": {
+                    "type": "integer",
+                    "minimum": 1, "maximum": 50, "default": 25,
+                    "description": (
+                        "Max promises probed; truncation is reported in "
+                        "`promises_truncated`, never silent."
+                    ),
+                },
+            },
+        },
+    )
+
+
 @server.list_tools()
 async def _list_tools() -> list[t.Tool]:
     return [
@@ -321,6 +372,7 @@ async def _list_tools() -> list[t.Tool]:
         _start_review_tool(),
         _start_design_tool(),
         _repo_audit_tool(),
+        _product_probe_tool(),
         _poll_review_tool(),
         _cancel_review_tool(),
         _list_reviews_tool(),
@@ -459,6 +511,35 @@ def _run_review_in_thread(job: Job, backend: Any | None = None) -> None:
         _REGISTRY.mark_done(job, report)
 
 
+def _run_probe_in_thread(job: Job, *, per_promise_timeout_s: int,
+                         promise_cap: int) -> None:
+    """Background body for a product-probe job. The policy was already
+    checked at start time (fail-fast); it is re-derived here because the
+    check is cheap and the environment is the single source of truth.
+    """
+    from .exec_policy import ExecPolicyError, policy_from_env
+    from .product_probe import run_product_probe
+    try:
+        report = run_product_probe(
+            job.project_dir,
+            policy=policy_from_env(),
+            cap=promise_cap,
+            per_promise_timeout_s=per_promise_timeout_s,
+            cancel_check=lambda: job.aborted,
+        )
+    except ExecPolicyError as exc:
+        _REGISTRY.mark_failed(job, f"execution policy refused: {exc}")
+        return
+    except Exception as exc:
+        _REGISTRY.mark_failed(job, f"product probe error: {exc!r}")
+        return
+    except BaseException as exc:  # pragma: no cover - signal path
+        _REGISTRY.mark_failed(job, f"interrupted: {type(exc).__name__}")
+        raise
+    if not job.is_terminal:
+        _REGISTRY.mark_done(job, report)
+
+
 async def _call_tool_impl(
     name: str, arguments: dict[str, Any],
 ) -> list[t.TextContent]:
@@ -531,6 +612,32 @@ async def _call_tool_impl(
             timeout_s=parsed["timeout_s"],
         )
         _EXECUTOR.submit(_run_design_in_thread, job, backend)
+        return [t.TextContent(type="text",
+                               text=json.dumps(job.as_dict()))]
+
+    if name == "start_product_probe":
+        from .exec_policy import ExecPolicyError, policy_from_env
+        project_dir = Path(arguments.get("project_dir") or os.getcwd())
+        timeout_pp = int(arguments.get("per_promise_timeout_s") or 30)
+        timeout_pp = max(5, min(600, timeout_pp))
+        cap = int(arguments.get("promise_cap") or 25)
+        cap = max(1, min(50, cap))
+        # Fail-fast: a caller without the operator opt-in learns NOW,
+        # with the knobs named, instead of from a job that fails later.
+        try:
+            resolved = policy_from_env().check(project_dir)
+        except ExecPolicyError as exc:
+            return [t.TextContent(type="text",
+                                   text=json.dumps({"error": str(exc)}))]
+        job = _REGISTRY.create(
+            claim=f"product_probe: {resolved}",
+            project_dir=resolved,
+            workers=[],
+            timeout_s=timeout_pp,
+        )
+        _EXECUTOR.submit(_run_probe_in_thread, job,
+                         per_promise_timeout_s=timeout_pp,
+                         promise_cap=cap)
         return [t.TextContent(type="text",
                                text=json.dumps(job.as_dict()))]
 
