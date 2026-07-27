@@ -145,9 +145,15 @@ def ephemeral_worktree(repo: Path, ref: str = "HEAD") -> Iterator[Path]:
         raise PinnedExecError(f"not a git repository: {repo}")
     head = _run_git(["rev-parse", "--verify", f"{ref}^{{commit}}"],
                     repo, f"resolving {ref}")
-    target = Path(tempfile.mkdtemp(prefix="critic-wt-"))
-    # mkdtemp created it; `git worktree add` wants to create it itself.
-    shutil.rmtree(target, ignore_errors=True)
+    container = Path(tempfile.mkdtemp(prefix="critic-wt-"))
+    # The checkout lives at <container>/<repo name>, NOT at the container
+    # itself: a flat package (repo directory == importable package, this
+    # very repository's layout) is importable by its own name only when a
+    # directory with that name exists — and the probe puts the container
+    # on PYTHONPATH so the worktree's code wins over an editable install
+    # of the same package. A worktree named critic-wt-8f3a can never win
+    # that race.
+    target = container / repo.name
     _run_git(["worktree", "add", "--detach", str(target), head],
              repo, "creating the worktree")
     try:
@@ -160,11 +166,11 @@ def ephemeral_worktree(repo: Path, ref: str = "HEAD") -> Iterator[Path]:
             _run_git(["worktree", "remove", "--force", str(target)],
                      repo, "removing the worktree")
         except PinnedExecError:
-            shutil.rmtree(target, ignore_errors=True)
             try:
                 _run_git(["worktree", "prune"], repo, "pruning worktrees")
             except PinnedExecError:
                 pass
+        shutil.rmtree(container, ignore_errors=True)
 
 
 def _cap(text: str, limit: int) -> str:
@@ -180,20 +186,25 @@ def run_pinned(
     *,
     timeout_s: int = 300,
     require_worktree: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> PinnedResult:
     """Execute a pinned argv in `cwd`. No shell, bounded, tree-killed.
 
-    `require_worktree` refuses a cwd that is not one of our temporary
-    worktrees — a guard against a caller wiring this to a real repository
-    by mistake, which is exactly the accident this module exists to make
-    impossible.
+    `require_worktree` refuses a cwd that is not inside one of our
+    temporary worktree containers — a guard against a caller wiring this
+    to a real repository by mistake, which is exactly the accident this
+    module exists to make impossible.
+
+    `extra_env` overlays the (cleaned) inherited environment — the probe
+    uses it to make the worktree win the import over an editable install.
     """
     import time as _time
 
     cwd = Path(cwd).resolve()
     if not cwd.is_dir():
         raise PinnedExecError(f"cwd does not exist: {cwd}")
-    if require_worktree and not cwd.name.startswith("critic-wt-"):
+    if require_worktree and not any(
+            p.name.startswith("critic-wt-") for p in (cwd, *cwd.parents)):
         raise PinnedExecError(
             f"refusing to execute outside an ephemeral worktree: {cwd}")
 
@@ -202,6 +213,8 @@ def run_pinned(
     for noisy in ("PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS", "COV_CORE_SOURCE",
                   "COVERAGE_FILE"):
         env.pop(noisy, None)
+    if extra_env:
+        env.update(extra_env)
 
     t0 = _time.perf_counter()
     try:
@@ -288,6 +301,18 @@ def run_falsification_probe(
     for repositories whose tests run in the environment the operator
     mounted this server in. A missing dependency shows up as the test
     erroring identically on BOTH sides, which a reader can see.
+
+    THE IMPORT MUST RESOLVE TO THE WORKTREE. An editable install of the
+    package under review resolves imports to the REAL directory — at
+    HEAD, fix present — so without a defence the pre-fix run would
+    import post-fix code, pass, and the probe would report "confirmation
+    post-hoc" about a genuine falsification. The defence: each run gets
+    PYTHONPATH = [worktree container (flat packages named after the repo
+    dir), the worktree itself (in-repo packages), worktree/src
+    (src-layout)] ahead of the inherited value. sys.path entries from
+    PYTHONPATH precede site-packages, where both editable mechanisms
+    (easy-install .pth and PEP 660 finders appended to sys.meta_path
+    after PathFinder) resolve — so the worktree wins.
     """
     repo = Path(repo).resolve()
     cmd = build_pinned_pytest(selector)
@@ -312,16 +337,27 @@ def run_falsification_probe(
             "experiment would compare a commit against itself and prove "
             "nothing")
 
+    def _worktree_env(wt: Path) -> dict[str, str]:
+        parts = [str(wt.parent), str(wt)]
+        if (wt / "src").is_dir():
+            parts.append(str(wt / "src"))
+        existing = os.environ.get("PYTHONPATH")
+        if existing:
+            parts.append(existing)
+        return {"PYTHONPATH": os.pathsep.join(parts)}
+
     with ephemeral_worktree(repo) as wt_post:
         post = run_pinned(cmd, wt_post, timeout_s=timeout_s,
-                          require_worktree=True)
+                          require_worktree=True,
+                          extra_env=_worktree_env(wt_post))
     with ephemeral_worktree(repo, ref=baseline_ref) as wt_pre:
         # Bring ONLY the regression test forward to HEAD. If the file is
         # identical on both commits this is a no-op, which is fine.
         _run_git(["checkout", head, "--", test_file], wt_pre,
                  f"taking {test_file} from HEAD into the baseline worktree")
         pre = run_pinned(cmd, wt_pre, timeout_s=timeout_s,
-                         require_worktree=True)
+                         require_worktree=True,
+                         extra_env=_worktree_env(wt_pre))
     return FalsificationProbe(
         post=post, pre=pre, head=head, baseline=baseline,
         selector=sel_norm, test_file=test_file,

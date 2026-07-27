@@ -149,6 +149,74 @@ def test_worktree_can_check_out_a_baseline_ref(fixed_repo: Path) -> None:
         assert not (wt / "test_mod.py").exists()
 
 
+def test_probe_wins_over_an_editable_install_of_the_same_package(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """THE self-review case. An editable install resolves the package to
+    the REAL directory (at HEAD, fix present), so without a defence the
+    pre-fix run would import post-fix code and pass — and the probe would
+    report "confirmation post-hoc" about a genuine falsification. The
+    worktree must win the import for the package under test.
+
+    Simulated exactly as pip does it for the legacy editable path: the
+    repo's PARENT on the import path, package named after the repo dir.
+
+    The tests directory has NO __init__.py on purpose: with one, pytest
+    itself walks up past the package and imports it from the worktree
+    (the nested-layout half of this defence). Without one — a common
+    layout — pytest only inserts tests/ on sys.path, the package resolves
+    through the import system, and PYTHONPATH is the only thing standing
+    between the probe and the editable install.
+    """
+    root = tmp_path / "flatpkg"
+    root.mkdir()
+    (root / "__init__.py").write_text("")
+    (root / "mod.py").write_text("def add(a, b):\n    return a - b\n")
+    _git("init", "-q", cwd=root)
+    _commit("bug", cwd=root)
+    (root / "mod.py").write_text("def add(a, b):\n    return a + b\n")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_mod.py").write_text(
+        "from flatpkg.mod import add\n\n\n"
+        "def test_add():\n    assert add(2, 3) == 5\n"
+    )
+    _commit("fix + regression test", cwd=root)
+    # The "editable install": the real repo's parent is importable, so
+    # `import flatpkg` finds the REAL (post-fix) code unless the probe
+    # puts the worktree first.
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    probe = run_falsification_probe(
+        root, "tests/test_mod.py::test_add", timeout_s=180)
+    assert probe.post.exit_code == 0, probe.post.stdout
+    assert probe.pre.exit_code != 0, (
+        "pre-fix run imported the post-fix code from the editable "
+        "install — the worktree did not win the import:\n"
+        + probe.pre.stdout)
+
+
+def test_probe_supports_a_src_layout(tmp_path: Path) -> None:
+    """src-layout repos import the installed package; in the worktree
+    nothing is installed, so the probe must make `src/` importable."""
+    root = tmp_path / "repo"
+    (root / "src" / "spkg").mkdir(parents=True)
+    (root / "src" / "spkg" / "__init__.py").write_text("")
+    (root / "src" / "spkg" / "mod.py").write_text(
+        "def add(a, b):\n    return a - b\n")
+    _git("init", "-q", cwd=root)
+    _commit("bug", cwd=root)
+    (root / "src" / "spkg" / "mod.py").write_text(
+        "def add(a, b):\n    return a + b\n")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_mod.py").write_text(
+        "from spkg.mod import add\n\n\n"
+        "def test_add():\n    assert add(2, 3) == 5\n"
+    )
+    _commit("fix + regression test", cwd=root)
+    probe = run_falsification_probe(
+        root, "tests/test_mod.py::test_add", timeout_s=180)
+    assert probe.post.exit_code == 0, probe.post.stdout
+    assert probe.pre.exit_code != 0, probe.pre.stdout
+
+
 # ---------------------------------------------------------------------------
 # The grant: "exec" exists per run, only where the operator allowed it
 # ---------------------------------------------------------------------------
