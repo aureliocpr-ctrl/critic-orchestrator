@@ -29,17 +29,48 @@
   documented/config/test tiers handled) and a **deviation register** (declared
   limitations with git-blame age; no silent caps — truncation is reported).
 
-### Validation
+### Validation (numbers restated after an adversarial re-review — see Fixed)
 - First live run (3 no-claim reviewers × Opus on a 5.7k-line retrieval core):
-  10 new true defects at 0 false positives, including a lock omission on the
-  exact path a claim-fed review had voted 3-0 clean. A controlled arm with the
-  proposer's (true) claim injected concentrated 3/3 findings inside the claim's
-  subject — reproducing the capture mechanism the no-claim contract removes.
-  Experiment harness: `experiments/exp_design_review.py`.
-- Suite: 128 passed (was 111; +17 design/audit tests, one added from a false
-  positive found on the first live audit run).
+  11 findings verified line-by-line, **0 false positives** — **7 genuinely new
+  defects** + 4 the code already declared as known limits. Among the new ones: a
+  lock omission on the exact breaker path a claim-fed review had voted 3-0 clean
+  the day before, a default-ON fusion path bypassing the `valid_until` gate its
+  own docstring promises "in every mode", and a deserializer silently dropping a
+  provenance column on every read.
+  - The first write-up said "10 new": it counted one defect twice (two lenses,
+    two angles) and promoted two code-declared limits to "new". Restated.
+- Capture effect: the arm given the proposer's *true* claim put 3/3 findings
+  inside that claim's subject vs 1/5 for the same lens+grid without it.
+  Predicted direction, **not significant** (Fisher exact p=0.14, n=1 per arm).
+  - The first write-up compared 3/3 against 0/3 — an arm differing in *two*
+    factors (claim AND grid). The single-factor comparison is 3/3 vs 1/5.
+- Reviewers ran on the proposer's own model family: this validates the **input
+  contract**, not model independence. Harness: `experiments/exp_design_review.py`.
+- Suite: 138 passed (was 111).
 - pyproject version intentionally NOT bumped: committed, not released —
   features accumulate to one tag.
+
+### Fixed — found by turning this tool's own three lenses on itself
+- **`design_review()` had zero call sites** (product and tests): dead code, the
+  built-never-wired class this tool's grid leads with. Now the verified
+  library-facing API with an end-to-end test.
+- **`audit_detectors` was reachable only from its own tests** — no MCP tool, so
+  the "audit gate" an agent could invoke did not exist. Now `run_repo_audit`.
+- **Default per-worker timeout was 300 s while 5 of the 9 measured design
+  workers ran 260-408 s** — the shipped default would have timed out the
+  majority of the run that validated the tool. Now 600 s (max 900), with the
+  measurement in the docstring. Same class as the daemon-lease constant a review
+  caught in the audited repo: a number true in its regime, false in the one it
+  must cover.
+- **`find_deviations` stashed its truncation flag on the function object** —
+  process-global mutable state under an 8-thread executor, so two concurrent
+  audits could overwrite each other's flag and the anti-silent-cap mechanism
+  could itself go silent (state-leak-across-runs, from this tool's own grid).
+  Truncation is now returned; a concurrency test pins it.
+- **A review that lost lenses to timeouts reported `no_blocking_findings`** — a
+  reassuring verdict derived from a third of the review (silent-failopen, also
+  from the grid). New `incomplete` status plus `lenses_ok` / `lenses_failed` in
+  every report; a blocking finding still wins over incompleteness.
 
 ## 0.5.0 — 2026-07-02 — Ghost-CLI backend: full triad without `claude --print`
 

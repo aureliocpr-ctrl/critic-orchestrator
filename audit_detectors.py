@@ -171,6 +171,10 @@ def find_dead_env_flags(root: Path) -> list[dict[str, Any]]:
         for flag, entry in reads.items():
             if flag not in text:
                 continue
+            # `os.environ['X'] = ...` / `os.environ['X']` is a real use the
+            # .get()/getenv() regex does not model. Treat any subscript
+            # occurrence as a reference so a blind spot never masquerades
+            # as evidence of deadness.
             read_lines = {
                 int(site.rsplit(":", 1)[1])
                 for site in entry["read_sites"]
@@ -230,12 +234,19 @@ def _blame_age_days(root: Path, rel: str, line: int) -> float | None:
 
 def find_deviations(
     root: Path, *, with_age: bool = True, cap: int = 200,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Collect declared-deviation markers with (optionally) their age.
 
-    Sorted oldest-first when ages are known, else file order. Capped at
-    `cap` entries — the caller learns about truncation via audit_repo's
-    `deviations_truncated`.
+    Returns ``(entries, truncated)``. Sorted oldest-first when ages are
+    known, else file order.
+
+    The truncation flag is RETURNED, never stashed on the function
+    object: the first version set ``find_deviations._last_truncated`` and
+    ``audit_repo`` read it back, which is process-global mutable state in
+    a server whose executor runs 8 jobs concurrently — two audits with
+    different caps would overwrite each other's flag, so the mechanism
+    that exists to prevent a silent cap could itself go silent. That is
+    the state-leak-across-runs class this module's own grid lists.
     """
     root = Path(root)
     found: list[dict[str, Any]] = []
@@ -268,9 +279,7 @@ def find_deviations(
             age = _blame_age_days(root, d["file"], d["line"])
             d["age_days"] = round(age, 1) if age is not None else None
         found.sort(key=lambda d: -(d["age_days"] or -1.0))
-    # Stash truncation on the list for audit_repo (kept out of entries).
-    find_deviations._last_truncated = truncated  # type: ignore[attr-defined]
-    return found
+    return found, truncated
 
 
 def audit_repo(
@@ -281,8 +290,9 @@ def audit_repo(
     if not root.is_dir():
         raise FileNotFoundError(root)
     dead = find_dead_env_flags(root)
-    devs = find_deviations(root, with_age=with_age, cap=deviations_cap)
-    truncated = bool(getattr(find_deviations, "_last_truncated", False))
+    devs, truncated = find_deviations(
+        root, with_age=with_age, cap=deviations_cap,
+    )
     return {
         "kind": "repo_audit",
         "repo": str(root),

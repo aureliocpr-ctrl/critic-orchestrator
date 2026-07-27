@@ -76,8 +76,16 @@ Output is aggregated by deduped, severity-ranked **findings** (a design review
 has no binary claim to hold or fail), with cross-lens corroboration recorded.
 
 On a first live run against a 5.7k-line retrieval core, the three no-claim
-reviewers surfaced 10 genuinely new defects at 0 false positives — including a
-lock omission on the exact path a claim-fed review had just voted 3-0 clean.
+reviewers produced 11 findings that survived line-by-line verification with **0
+false positives**: **7 genuinely new defects** (including a lock omission on the
+exact path a claim-fed review had voted 3-0 clean the day before) and 4 that the
+code itself already declared as known limits. A control arm given the proposer's
+*true* claim put 3 of 3 findings inside that claim's subject, against 1 of 5 for
+the same lens without it — the capture effect this contract removes, in the
+predicted direction but **not statistically significant** at n=1 per arm
+(Fisher exact p=0.14). Single run, and the reviewers ran on the same model
+family as the proposer: this measures the *input contract*, not model
+independence.
 
 ### Deterministic audit (`audit_detectors.py`)
 
@@ -92,7 +100,14 @@ design grid:
   becomes a queue item instead of wallpaper. No silent caps: truncation is
   reported.
 
-Run standalone: `python -m critic_orchestrator.audit_detectors <repo> --no-age`.
+Exposed as the MCP tool **`run_repo_audit`** (returns immediately, no job), or
+standalone: `python -m critic_orchestrator.audit_detectors <repo> --no-age`.
+
+The detectors report *candidates* for a judge, not verdicts, and their blind
+spots are declared: the flag detector models `os.environ.get()` / `os.getenv()`
+(a subscript occurrence anywhere counts as a reference, so a blind spot never
+reads as evidence of deadness), and it treats an `or`-fallback as the effective
+default — a false positive found on the first live run and pinned by a test.
 
 ---
 

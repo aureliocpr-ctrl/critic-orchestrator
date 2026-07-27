@@ -42,6 +42,7 @@ import mcp.types as t
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+from .audit_detectors import audit_repo
 from .backends import make_backend_from_env
 from .default_workers import build_default_workers
 from .design_workers import aggregate_design_report, build_design_workers
@@ -241,13 +242,62 @@ def _start_design_tool() -> t.Tool:
                 },
                 "timeout_s": {
                     "type": "integer",
-                    "minimum": 60, "maximum": 600, "default": 300,
+                    "minimum": 60, "maximum": 900, "default": 600,
                     "description": (
-                        "Per-worker subprocess timeout (server-side)."
+                        "Per-worker subprocess timeout (server-side). "
+                        "Design reviewers read whole modules: 5 of 9 "
+                        "measured workers on a 5.7k-line file ran "
+                        "260-408 s, so do not lower this below ~480 for "
+                        "large modules."
                     ),
                 },
             },
             "required": ["module_paths"],
+        },
+    )
+
+
+def _repo_audit_tool() -> t.Tool:
+    return t.Tool(
+        name="run_repo_audit",
+        description=(
+            "DETERMINISTIC repo audit — no LLM, no network, so it cannot "
+            "confabulate. Two detectors over the whole repo: (1) dead env "
+            "flags — a capability gated behind a falsy-default env flag "
+            "that no config, doc, script, or assignment ever sets (the "
+            "built-never-wired class); (2) deviation register — declared "
+            "limitations (KNOWN LIMIT / FIXME / 'for now') with their "
+            "git-blame age, so an old unrevisited exception becomes a "
+            "queue item instead of wallpaper. Truncation is always "
+            "reported, never silent. Returns immediately (no job)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_dir": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the repository root to audit. "
+                        "Defaults to $PWD."
+                    ),
+                },
+                "with_age": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Resolve each deviation's age via git blame "
+                        "(slower on large repos; set false to skip)."
+                    ),
+                },
+                "deviations_cap": {
+                    "type": "integer",
+                    "minimum": 1, "maximum": 2000, "default": 200,
+                    "description": (
+                        "Max deviation entries returned; truncation is "
+                        "reported in `deviations_truncated`."
+                    ),
+                },
+            },
         },
     )
 
@@ -270,6 +320,7 @@ async def _list_tools() -> list[t.Tool]:
         _force_review_tool(),
         _start_review_tool(),
         _start_design_tool(),
+        _repo_audit_tool(),
         _poll_review_tool(),
         _cancel_review_tool(),
         _list_reviews_tool(),
@@ -331,8 +382,8 @@ def _parse_design(arguments: dict[str, Any]) -> dict[str, Any] | str:
     error_grid = arguments.get("error_grid") or None
     if error_grid is not None and not isinstance(error_grid, list):
         return "error_grid must be an array of strings"
-    timeout_s = int(arguments.get("timeout_s") or 300)
-    timeout_s = max(60, min(600, timeout_s))
+    timeout_s = int(arguments.get("timeout_s") or 600)
+    timeout_s = max(60, min(900, timeout_s))
     workers = build_design_workers(
         module_paths=module_paths,
         design_doc=str(design_doc) if design_doc else None,
@@ -482,6 +533,29 @@ async def _call_tool_impl(
         _EXECUTOR.submit(_run_design_in_thread, job, backend)
         return [t.TextContent(type="text",
                                text=json.dumps(job.as_dict()))]
+
+    if name == "run_repo_audit":
+        repo = Path(arguments.get("project_dir") or os.getcwd())
+        cap = int(arguments.get("deviations_cap") or 200)
+        cap = max(1, min(2000, cap))
+        with_age = arguments.get("with_age")
+        with_age = True if with_age is None else bool(with_age)
+        # Deterministic but IO-bound (walks the tree, spawns git blame):
+        # run it off the event loop so a large repo cannot stall the
+        # server's stdio handling.
+        loop = asyncio.get_running_loop()
+        try:
+            report = await loop.run_in_executor(
+                _EXECUTOR,
+                lambda: audit_repo(repo, with_age=with_age,
+                                   deviations_cap=cap),
+            )
+        except FileNotFoundError:
+            return [t.TextContent(type="text", text=json.dumps({
+                "error": f"project_dir not found: {repo}",
+            }))]
+        return [t.TextContent(type="text",
+                               text=json.dumps(report, indent=2))]
 
     if name == "poll_adversarial_review":
         job_id = str(arguments.get("job_id", "")).strip()

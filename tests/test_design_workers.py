@@ -37,6 +37,7 @@ from critic_orchestrator.design_workers import (
     DesignReport,
     aggregate_design_report,
     build_design_workers,
+    design_review,
 )
 from critic_orchestrator.job_registry import JobRegistry
 from critic_orchestrator.orchestrator import CriticReport, WorkerVerdict
@@ -356,6 +357,76 @@ def test_start_design_review_end_to_end(tmp_path: Path) -> None:
     # 3 workers × same fake finding → deduped to one, corroborated twice.
     assert len(result["findings"]) == 1
     assert len(result["findings"][0]["corroborated_by"]) == 2
+
+
+def test_design_review_helper_runs_end_to_end(tmp_path: Path) -> None:
+    """`design_review()` is the library-facing one-call API. It had ZERO
+    call sites (product AND tests) when first shipped — the exact
+    built-never-wired class this tool's own grid leads with. This test is
+    its verified caller."""
+    (tmp_path / "m.py").write_text("x = 1\n")
+    fake = _fake_design_popen({
+        "inferred_purpose": "p", "findings": [], "summary": "s",
+        "confidence": 0.5,
+    })
+    with patch("critic_orchestrator.orchestrator.subprocess.Popen",
+               return_value=fake):
+        rep = design_review(["m.py"], tmp_path, timeout=60)
+    assert isinstance(rep, DesignReport)
+    assert rep.status == "no_blocking_findings"
+    assert rep.target == "m.py"
+    assert len(rep.workers) == 3
+
+
+def test_default_timeout_covers_the_measured_worker_durations() -> None:
+    """Shipped default was 300 s while 5 of 9 measured design workers ran
+    260-408 s: the product was validated at 480 s and shipped at 300.
+    Same class as the daemon-lease number this repo's own review found —
+    a real number in its regime, false in the one it must cover."""
+    from critic_orchestrator import mcp_server as _ms
+    slowest_measured_s = 408
+    sig_default = inspect.signature(design_review).parameters["timeout"].default
+    assert sig_default >= slowest_measured_s
+    schema_timeout = (
+        _ms._start_design_tool().inputSchema["properties"]["timeout_s"]
+    )
+    assert schema_timeout["default"] >= slowest_measured_s
+    assert schema_timeout["maximum"] >= schema_timeout["default"]
+
+
+def test_status_is_incomplete_when_a_lens_dies_and_nothing_blocks() -> None:
+    """A timeout on 2 of 3 lenses used to yield `no_blocking_findings` —
+    a reassuring status derived from a third of the review. 'Nothing
+    blocking' from one surviving lens is not 'nothing blocking'."""
+    rep = aggregate_design_report(_report([
+        _verdict("premortem", [_finding("t", "medium")]),
+        _verdict("perimeter", [], ok=False),
+        _verdict("detection", [], ok=False),
+    ]), target="m.py")
+    assert rep.status == "incomplete"
+    d = rep.as_dict()
+    assert d["lenses_ok"] == ["premortem"]
+    assert d["lenses_failed"] == ["perimeter", "detection"]
+
+
+def test_blocking_findings_win_over_incompleteness() -> None:
+    """A blocking finding found is found, even if other lenses died."""
+    rep = aggregate_design_report(_report([
+        _verdict("premortem", [_finding("t", "critical")]),
+        _verdict("perimeter", [], ok=False),
+    ]), target="m.py")
+    assert rep.status == "blocking_findings"
+    assert rep.as_dict()["lenses_failed"] == ["perimeter"]
+
+
+def test_complete_review_with_no_blockers_stays_clean() -> None:
+    rep = aggregate_design_report(_report([
+        _verdict("premortem", [_finding("t", "low")]),
+        _verdict("perimeter", []),
+        _verdict("detection", []),
+    ]), target="m.py")
+    assert rep.status == "no_blocking_findings"
+    assert rep.as_dict()["lenses_failed"] == []
 
 
 def test_start_design_review_rejects_missing_paths(tmp_path: Path) -> None:

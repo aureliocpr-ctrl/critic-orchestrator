@@ -448,7 +448,11 @@ class DesignReport:
     """
 
     target: str
-    status: str  # "blocking_findings" | "no_blocking_findings" | "undecided"
+    #: "blocking_findings" | "no_blocking_findings" | "incomplete"
+    #: | "undecided". ``incomplete`` exists because a review that lost
+    #: lenses to timeouts used to report ``no_blocking_findings`` — a
+    #: reassuring verdict derived from a third of the review.
+    status: str
     findings: list[dict[str, Any]]
     by_severity: dict[str, int]
     workers: list[WorkerVerdict]
@@ -463,6 +467,8 @@ class DesignReport:
             "kind": "design_review",
             "target": self.target,
             "status": self.status,
+            "lenses_ok": [w.name for w in self.workers if w.ok],
+            "lenses_failed": [w.name for w in self.workers if not w.ok],
             "by_severity": dict(self.by_severity),
             "findings_per_file": per_file,
             "findings": list(self.findings),
@@ -579,10 +585,15 @@ def aggregate_design_report(
     for f in findings:
         by_severity[f["severity"]] += 1
 
+    lenses_failed = [w for w in report.workers if not w.ok]
     if not any_worker_ok:
         status = "undecided"
     elif by_severity["critical"] or by_severity["high"]:
+        # A blocking finding found is found, whatever the other lenses did.
         status = "blocking_findings"
+    elif lenses_failed:
+        # "Nothing blocking" from a partial review is not nothing blocking.
+        status = "incomplete"
     else:
         status = "no_blocking_findings"
 
@@ -603,7 +614,13 @@ def design_review(
     *,
     design_doc: str | None = None,
     error_grid: list[dict[str, str]] | list[str] | None = None,
-    timeout: int = 300,
+    # 600, not the 300 first shipped: 5 of the 9 design workers measured
+    # on 2026-07-27 ran 260-408 s (a 5.7k-line module), so the shipped
+    # default would have timed out the majority of the very review that
+    # validated the tool. Same class as the daemon-lease constant this
+    # repo's own review caught — a number true in its regime, false in
+    # the one it must cover.
+    timeout: int = 600,
     extra_mcp: dict[str, Any] | None = None,
     max_parallel: int = 3,
     popen_sink: list[subprocess.Popen] | None = None,
