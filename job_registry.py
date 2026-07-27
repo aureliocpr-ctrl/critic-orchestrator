@@ -141,6 +141,10 @@ class JobRegistry:
             job.report = report
             job.status = "done"
             job.ended_at = time.time()
+            # Sweep on terminal transitions too, not only on create/get:
+            # a server whose caller never polls again would otherwise keep
+            # every finished job for the life of the process.
+            self._gc_expired_locked()
 
     def mark_failed(self, job: Job, error: str) -> None:
         with self._lock:
@@ -149,6 +153,7 @@ class JobRegistry:
             job.error = error
             job.status = "failed"
             job.ended_at = time.time()
+            self._gc_expired_locked()
 
     def mark_cancelled(self, job: Job) -> None:
         with self._lock:

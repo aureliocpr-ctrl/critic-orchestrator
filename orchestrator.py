@@ -404,8 +404,24 @@ def _spawn_worker(
     )
 
 
+def _backend_accepts_cancel(backend: Any) -> bool:
+    """True iff this backend's run_worker takes a `cancel_check` kwarg.
+
+    Backends are duck-typed, and third-party ones in the wild have the
+    original 3-argument signature. Probing once keeps them working
+    instead of breaking them with an unexpected keyword.
+    """
+    try:
+        import inspect
+        params = inspect.signature(backend.run_worker).parameters
+        return "cancel_check" in params
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
 def _run_via_backend(
     backend: Any, spec: WorkerSpec, project_dir: Path, timeout: int,
+    *, cancel_check: Callable[[], bool] | None = None,
 ) -> WorkerVerdict:
     """Run one worker through a provider backend (duck-typed: any object
     with a `run_worker(spec, project_dir, timeout) -> BackendResult`).
@@ -414,10 +430,30 @@ def _run_via_backend(
     aggregation path is identical to the CLI path. Any exception raised by
     the backend is captured as a non-ok verdict rather than crashing the
     whole review.
+
+    CANCELLATION. `JobRegistry.cancel` works by killing registered Popen
+    handles — and a backend worker registers none, so before this hook a
+    cancelled job reported `killed_workers: 0` while every backend worker
+    kept calling its endpoint to completion (up to `max_steps` paid calls
+    for an agentic backend). Found live, at severity critical, by an
+    independent model reviewing this repository through the agentic
+    backend. Two defences: a pre-flight check here (an aborted job costs
+    no request at all) and, for backends that accept it, the check is
+    threaded inside so a long loop can stop between steps.
     """
     t0 = time.perf_counter()
+    if cancel_check is not None and cancel_check():
+        return WorkerVerdict(
+            name=spec.name, verdict=None,
+            error="cancelled before backend call", cost_usd=0.0,
+            duration_ms=int((time.perf_counter() - t0) * 1000),
+        )
     try:
-        res = backend.run_worker(spec, project_dir, timeout)
+        if cancel_check is not None and _backend_accepts_cancel(backend):
+            res = backend.run_worker(spec, project_dir, timeout,
+                                      cancel_check=cancel_check)
+        else:
+            res = backend.run_worker(spec, project_dir, timeout)
         verdict, error = res.verdict, res.error
         cost, preview = res.cost_usd, res.raw_preview
     except Exception as exc:  # pragma: no cover - defensive
@@ -474,7 +510,8 @@ def adversarial_review(
         else:
             futures = [
                 pool.submit(_run_via_backend, backend, spec,
-                              project_dir, timeout)
+                              project_dir, timeout,
+                              cancel_check=cancel_check)
                 for spec in workers
             ]
         results = [f.result() for f in futures]

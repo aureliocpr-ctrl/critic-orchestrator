@@ -273,6 +273,47 @@ def make_backend_from_env() -> Any | None:
             raise ValueError("CRITIC_BACKEND=anthropic_api requires ANTHROPIC_API_KEY")
         model = (os.environ.get("CRITIC_MODEL") or _DEFAULT_ANTHROPIC_MODEL).strip()
         return AnthropicAPIBackend(api_key=key, model=model)
+    if kind in ("agentic_api", "agentic"):
+        # Same endpoints as openai_compat, driven as a TOOL-USING agent, so
+        # `requires_execution` workers (both design lenses and the two
+        # executive critics) actually run instead of being skipped.
+        from .agentic_api import (
+            DEFAULT_MAX_STEPS,
+            DEFAULT_READ_BUDGET_BYTES,
+            AgenticApiBackend,
+        )
+        key = (os.environ.get("CRITIC_API_KEY")
+               or os.environ.get("OPENAI_API_KEY") or "").strip()
+        base = (os.environ.get("CRITIC_BASE_URL")
+                or os.environ.get("OPENAI_BASE_URL") or "").strip()
+        model = (os.environ.get("CRITIC_MODEL") or "").strip()
+        if not base:
+            raise ValueError(
+                "CRITIC_BACKEND=agentic_api requires CRITIC_BASE_URL "
+                "(e.g. https://api.moonshot.ai/v1)")
+        if not model:
+            raise ValueError(
+                "CRITIC_BACKEND=agentic_api requires CRITIC_MODEL")
+        if not key:
+            raise ValueError(
+                "CRITIC_BACKEND=agentic_api requires CRITIC_API_KEY "
+                "(or OPENAI_API_KEY)")
+
+        def _int_env(name: str, default: int) -> int:
+            raw = (os.environ.get(name) or "").strip()
+            try:
+                return max(1, int(raw)) if raw else default
+            except ValueError:
+                return default
+
+        temp_raw = (os.environ.get("CRITIC_TEMPERATURE") or "").strip()
+        return AgenticApiBackend(
+            base_url=base, api_key=key, model=model,
+            max_steps=_int_env("CRITIC_MAX_STEPS", DEFAULT_MAX_STEPS),
+            read_budget_bytes=_int_env("CRITIC_READ_BUDGET_BYTES",
+                                        DEFAULT_READ_BUDGET_BYTES),
+            temperature=float(temp_raw) if temp_raw else None,
+        )
     if kind in ("openai_compat", "openai", "deepseek", "kimi", "moonshot",
                 "openrouter", "together", "groq", "local"):
         key = (os.environ.get("CRITIC_API_KEY")

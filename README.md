@@ -103,12 +103,10 @@ never fabricated. That is stricter than the post-fix triad, where the
 | `openai_compat` (Kimi, GLM, DeepSeek, OpenAI, …) | 1 of 3 | **0 of 3** |
 | `anthropic_api` | 1 of 3 | **0 of 3** |
 
-To run the design lenses on a non-Claude model you need an *agentic* CLI for it.
-One is available locally: `veri run --approve plan --json -m kimi-k3` exposes
-`fs_read / fs_list / fs_glob / fs_grep` under a read-only policy — the exact tool
-set the lenses need. A `veri_cli` backend is therefore a small, well-defined
-addition; it is **not built yet**, and until it is, model-independent design
-review is unmeasured.
+The gap is closed by `agentic_api` (see below): the same OpenAI-compatible
+endpoints, driven as a real agent loop with read-only filesystem tools, so the
+design lenses run on Kimi, GLM, DeepSeek and friends without a coding-agent CLI
+in the middle.
 
 ### Deterministic audit (`audit_detectors.py`)
 
