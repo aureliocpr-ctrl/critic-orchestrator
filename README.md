@@ -100,8 +100,20 @@ never fabricated. That is stricter than the post-fix triad, where the
 | Backend | offers | post-fix triad | design review |
 |---|---|---|---|
 | `claude_cli` / `ghost_cli` (subscription) | read + exec | 3 of 3 | **3 of 3** |
-| **`agentic_api`** (Kimi, GLM, DeepSeek, …) | read (+ exec when the operator allows it) | **2 of 3**, 3 with execution enabled | **3 of 3** |
+| **`agentic_api`** (Kimi, GLM, DeepSeek, …) | read; **exec per run** where the operator's `CRITIC_ALLOW_EXEC=1` + `CRITIC_EXEC_ROOTS` policy grants it | **3 of 3** with the opt-in (verified live, below); 2 of 3 without | **3 of 3** |
 | `openai_compat` / `anthropic_api` | — | 1 of 3 | 0 of 3 |
+
+With the opt-in, `falsification` runs through **pinned execution**: the model
+sees ONE tool, `run_falsification_experiment`, that takes **no arguments** and
+runs the experiment code already decided — the test at HEAD in an ephemeral
+worktree (fix present, expected PASS) and at the pre-fix baseline with only the
+test file taken from HEAD (fix absent, expected FAIL). The model's job is the
+part that needs a model: telling the pinned assertion's failure from an
+unrelated ImportError. Verified live on DeepSeek reviewing this repository's
+own editable-install fix: 3/3 reviewers, `falsification` at 0.98 explicitly
+distinguishing "genuine assertion error" from "import error or missing
+dependency". A denied policy produces a skip whose message names the knobs —
+never a reviewer that reasons where it should have observed.
 
 Measured on real endpoints, one design lens over a small module:
 
@@ -132,16 +144,20 @@ not required.
 with read-only filesystem tools, so the design lenses run on any provider with
 tool calling — no coding-agent CLI in the middle, no extra dependency.
 
-**Why 2 of 3 and not 3.** Each reviewer declares what it *needs*
+**Why the skip exists at all.** Each reviewer declares what it *needs*
 (`WorkerSpec.needs`) and each backend declares what it *offers*
 (`capabilities`); a reviewer whose needs exceed the offer is skipped, never
 answered. `caller_verification` needs `read` (grep is its whole method) and
-runs. `falsification` needs `exec` — its method *is* `git stash` + run the test
-+ restore + run again — so a read-only sandbox refuses it. That refusal is the
-point: left to run, the model would read the test, *reason* about whether it
-would fail pre-fix, and answer `test_falsifies_master: true` having executed
-nothing. A conclusion with no observation behind it is exactly the
-confabulation this tool exists to catch, so no verdict is better than that one.
+always runs. `falsification` needs `exec` — its method *is* run-the-test — so
+without the operator opt-in a read-only sandbox refuses it. That refusal is
+the point: left to run, the model would read the test, *reason* about whether
+it would fail pre-fix, and answer `test_falsifies_master: true` having
+executed nothing. A conclusion with no observation behind it is exactly the
+confabulation this tool exists to catch, so no verdict is better than that
+one. The `exec` capability is decided **per run**, never stored on the
+backend: it exists only for a `project_dir` inside the operator's allowlisted
+roots — the caller does not choose where this server executes; the operator
+does.
 
 ### Deterministic audit (`audit_detectors.py`)
 
@@ -164,6 +180,30 @@ spots are declared: the flag detector models `os.environ.get()` / `os.getenv()`
 (a subscript occurrence anywhere counts as a reference, so a blind spot never
 reads as evidence of deadness), and it treats an `or`-fallback as the effective
 default — a false positive found on the first live run and pinned by a test.
+
+### Product probe (`start_product_probe`)
+
+The design lenses read code; `falsification` runs the *author's* tests. Both
+verify what someone already thought to check. The probe treats documentation
+and packaging as a **contract** and executes it: shell fences in
+README/USAGE/QUICKSTART/docs, `[project.scripts]` entry points (`--help` — the
+testable promise is "exists and starts", not its real job with invented
+arguments), and `python -m` targets with a `__main__`.
+
+Each promise is then **kept or broken with the real output**. A documented
+server keeps its promise by *staying up* through the grace period; exiting on
+its own is the failure. Promises are extracted from a worktree at HEAD — an
+uncommitted README line is not a promise yet — and executed there: argv only,
+no shell, per-promise timeout with process-tree kill.
+
+What is never executed, whatever the docs say: setup (`pip install`, …),
+destructive and outbound commands, and anything that would *reintroduce a
+shell* (`powershell -c`, `cmd /c`, `bash -c`, `env`, `xargs`, `eval`, …) —
+argv-only execution is worthless if one argv element hands the shell back.
+Execution requires the same operator opt-in as the falsification wiring
+(`CRITIC_ALLOW_EXEC=1` + `CRITIC_EXEC_ROOTS`); without it the tool refuses
+immediately with the knobs named. Async: `start_product_probe` returns a
+`job_id`; poll and cancel with the existing review tools.
 
 ---
 

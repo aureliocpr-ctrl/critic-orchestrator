@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased — The three wirings: execution reaches third-party providers
+
+The remaining residue was three instances of the same class this product
+hunts — *built-never-wired* — and closing them was gated on its own grid.
+
+### Added
+- **Pinned execution wired into `falsification`** (`WorkerSpec.exec_request`,
+  `AgenticApiBackend.exec_policy`): with the operator opt-in
+  (`CRITIC_ALLOW_EXEC=1` + `CRITIC_EXEC_ROOTS`), the API backends run the
+  falsification reviewer through ONE no-argument tool,
+  `run_falsification_experiment`, that executes the experiment code already
+  decided: the test at HEAD in an ephemeral worktree (expected PASS) and at
+  the pre-fix baseline with only the test file taken from HEAD (expected
+  FAIL). The `exec` capability is decided **per run** — it exists only for a
+  `project_dir` the operator allowlisted; a denial travels into the skip
+  message with the knobs named. Third-party providers go from 2/3 to **3/3
+  reviewers — verified live on DeepSeek** reviewing this repository's own
+  editable-install fix (falsification 0.98, explicitly distinguishing the
+  pinned assertion's failure from an import error).
+- **`start_product_probe` (MCP)** — the promises finally have an executor:
+  extraction (already shipped) now feeds `run_promise`/`run_product_probe`,
+  which execute each promise in a worktree at HEAD (argv via shlex, no
+  shell, per-promise timeout with tree kill, cancellable between promises)
+  and score kept/broken/not_run. Fail-fast at start when the operator
+  opt-in is missing. `_REFUSED_PATTERNS` learns the **shell-reintroduction**
+  class (`powershell`, `pwsh`, `cmd`, `bash`/`sh`/`zsh`/`fish`/`ksh`,
+  `env`, `xargs`, `eval`, `exec`, `start`, `format`, `fdisk`, `mount`) —
+  refused at extraction AND re-refused at execution.
+- **Ghost backend cancellation**: `cancel_check` pre-flight (no sister boot
+  for an already-cancelled review), post-boot, and per-tick in the response
+  poll; the one blind window (the boot, bounded by `boot_timeout_s`) is
+  documented. Previously a cancelled ghost review ran to its full timeout
+  with the hidden sister alive.
+
+### Fixed
+- **The probe out-imports an editable install of the reviewed package.**
+  Found by refusing to trust the first green: an editable install resolves
+  imports to the REAL directory (at HEAD, fix present), so the pre-fix run
+  would import post-fix code, pass, and the probe would report
+  "confirmation post-hoc" about a genuine falsification — a confident wrong
+  verdict about the reviewer's own method. Cure: the worktree checkout is
+  nested at `<container>/<repo-name>` and every probe run gets
+  `PYTHONPATH=[container, worktree, worktree/src]` ahead of the inherited
+  value, which precedes site-packages where both editable mechanisms
+  resolve. The first pinning test used a layout where the nested checkout
+  alone already won (tests *inside* the package) and the mutation survived;
+  rewritten against `tests/` without `__init__.py`, where PYTHONPATH is the
+  only defence.
+- **`fs_grep` streams instead of slurping.** A live grep over a directory
+  containing session logs died with `MemoryError`: `read_text` loads whole
+  files, and a jsonl log can be ONE multi-hundred-MB line. Now line-wise
+  `readline(cap)` with per-file (2 MB) and per-line (64 KB) caps, exact
+  line numbers for normal files, partially-scanned files named in the
+  result.
+
+### Validation
+- 68 new tests (suite 349 passed, 2 skipped, ruff clean repo-wide).
+- 14 targeted mutations across the three wirings, each killed by its
+  pinning test (grant-never-built, cache-removed, frame-removed,
+  pre-runs-on-head, exec-request-unwired, pythonpath-not-set,
+  src-layout-dropped, preflight-removed, poll-check-removed,
+  policy-not-consulted, re-refusal-removed, extract-from-real-tree,
+  cancel-ignored, fail-fast-removed); restores verified after every run.
+- Live: DeepSeek 3/3 on the post-fix triad with execution
+  (`experiments/exp_falsification_live.py`); the first two runs of that
+  experiment failed honestly — a wrong `project_dir` produced the policy
+  denial exactly as worded, and the harness read `report` where the tool
+  returns `result` — both fixed in the experiment, not papered over.
+
 ## Unreleased — Design review: the no-claim gate + deterministic audit
 
 ### Added
