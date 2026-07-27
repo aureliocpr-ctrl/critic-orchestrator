@@ -436,6 +436,12 @@ class AgenticApiBackend:
         tools = _tool_schemas(spec.schema)
         spent = 0
         steps = 0
+        #: What the loop actually did, surfaced in raw_preview. A live GLM
+        #: run burned 14 steps and 323 s and the bare "budget exhausted"
+        #: error could not say on what — untraceable spend is unfixable
+        #: spend.
+        trace: list[str] = []
+        nudged = False
         while steps < self.max_steps:
             if cancel_check is not None and cancel_check():
                 return BackendResult(
@@ -444,25 +450,63 @@ class AgenticApiBackend:
                            "requests issued"),
                 )
             steps += 1
+            remaining = self.max_steps - steps
+            # WIND-DOWN. An explorer that never converges wastes the whole
+            # run: warn once with room to act, then on the last step ask
+            # the endpoint to REQUIRE the verdict tool. GLM 4.6 spent all
+            # 14 steps reading and submitted nothing; a silent cut-off
+            # turns that into zero output instead of a partial answer.
+            if remaining <= 2 and not nudged and remaining > 0:
+                nudged = True
+                trace.append(f"step{steps}:wind-down-notice")
+                messages.append({"role": "user", "content": (
+                    f"You have {remaining} step(s) left. Stop investigating "
+                    "and call submit_verdict now with what you have "
+                    "established so far — a partial but honest verdict is "
+                    "expected here; do not keep reading."
+                )})
             body: dict[str, Any] = {
                 "model": self.model,
                 "messages": messages,
                 "tools": tools,
             }
+            force_verdict = remaining == 0
+            if force_verdict:
+                body["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": "submit_verdict"},
+                }
+                trace.append(f"step{steps}:forced-submit_verdict")
             if self.temperature is not None:
                 body["temperature"] = self.temperature
             try:
                 payload = self._post(body, timeout)
             except urllib.error.HTTPError as exc:
-                detail = ""
-                try:
-                    detail = exc.read().decode()[:200]
-                except Exception:  # pragma: no cover - body already consumed
-                    pass
-                return BackendResult(
-                    verdict=None,
-                    error=f"http {exc.code}: {exc.reason} {detail}".strip(),
-                )
+                # Some providers reject tool_choice. Retry once, plain,
+                # rather than losing an otherwise-complete review.
+                if force_verdict and exc.code in (400, 422):
+                    body.pop("tool_choice", None)
+                    trace.append(f"step{steps}:tool_choice-unsupported")
+                    try:
+                        payload = self._post(body, timeout)
+                    except (urllib.error.HTTPError, urllib.error.URLError,
+                            OSError, json.JSONDecodeError) as exc2:
+                        return BackendResult(
+                            verdict=None,
+                            error=f"retry without tool_choice failed: {exc2}",
+                            raw_preview=" | ".join(trace),
+                        )
+                else:
+                    detail = ""
+                    try:
+                        detail = exc.read().decode()[:200]
+                    except Exception:  # pragma: no cover - body consumed
+                        pass
+                    return BackendResult(
+                        verdict=None,
+                        error=f"http {exc.code}: {exc.reason} {detail}".strip(),
+                        raw_preview=" | ".join(trace),
+                    )
             except urllib.error.URLError as exc:
                 return BackendResult(
                     verdict=None, error=f"transport: {exc.reason}",
@@ -535,6 +579,11 @@ class AgenticApiBackend:
                         )
                     return BackendResult(verdict=args, error=None)
 
+                trace.append(
+                    f"step{steps}:{name}"
+                    + (f"({args.get('path') or args.get('pattern')})"
+                       if (args.get("path") or args.get("pattern")) else "")
+                )
                 if spent >= self.read_budget_bytes:
                     out = (f"error: read budget exhausted "
                            f"({self.read_budget_bytes} bytes). Stop reading "
@@ -556,6 +605,7 @@ class AgenticApiBackend:
             verdict=None,
             error=(f"step budget exhausted after {self.max_steps} steps "
                    "without a verdict"),
+            raw_preview=" | ".join(trace),
         )
 
 

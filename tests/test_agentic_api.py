@@ -330,6 +330,77 @@ def test_step_budget_exhausted_returns_error_not_a_verdict(
         res = _backend(max_steps=3).run_worker(_spec(), tmp_path, 60)
     assert res.verdict is None
     assert "step budget" in (res.error or "").lower()
+    # The trace must say WHAT it spent the budget on — a live GLM run
+    # burned 14 steps and 323 s and the error alone could not say why.
+    assert "fs_read" in res.raw_preview
+
+
+def test_a_wind_down_notice_arrives_before_the_budget_ends(
+    tmp_path: Path,
+) -> None:
+    """A model that keeps exploring must be told the budget is closing,
+    not silently cut off. GLM 4.6 spent every step reading and never
+    submitted; a plain cut-off wastes the whole run."""
+    (tmp_path / "m.py").write_text("x = 1\n")
+    scripted = _Scripted([
+        _assistant_tool_call("fs_read", {"path": "m.py"}, f"c{i}")
+        for i in range(5)
+    ])
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        _backend(max_steps=5).run_worker(_spec(), tmp_path, 60)
+    # Somewhere in the later requests, a user-role nudge appears.
+    nudges = [
+        m for r in scripted.requests for m in r["messages"]
+        if m["role"] == "user" and "step" in str(m.get("content", "")).lower()
+        and "submit_verdict" in str(m.get("content", ""))
+    ]
+    assert nudges, "no wind-down notice was ever sent"
+
+
+def test_final_step_forces_the_verdict_tool(tmp_path: Path) -> None:
+    """On the last step the endpoint is asked to REQUIRE submit_verdict:
+    an explorer that would have run out gets one forced chance to
+    conclude. Degrades silently on providers that reject tool_choice."""
+    (tmp_path / "m.py").write_text("x = 1\n")
+    scripted = _Scripted([
+        _assistant_tool_call("fs_read", {"path": "m.py"}, "c1"),
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": True, "evidence": "e"}, "c2"),
+    ])
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend(max_steps=2).run_worker(_spec(), tmp_path, 60)
+    assert res.verdict is not None
+    last = scripted.requests[-1]
+    assert last.get("tool_choice") == {
+        "type": "function", "function": {"name": "submit_verdict"},
+    }
+
+
+def test_tool_choice_rejection_is_retried_without_it(tmp_path: Path) -> None:
+    """Not every provider supports forcing a tool. A 400 that names
+    tool_choice must be retried without it rather than losing the run."""
+    import urllib.error
+
+    calls = {"n": 0}
+
+    def _fake(req: Any, timeout: float | None = None) -> _FakeResponse:
+        body = json.loads(req.data.decode())
+        calls["n"] += 1
+        if "tool_choice" in body:
+            raise urllib.error.HTTPError(
+                "u", 400, "tool_choice is not supported", {},  # type: ignore[arg-type]
+                None,  # type: ignore[arg-type]
+            )
+        return _FakeResponse(_assistant_tool_call(
+            "submit_verdict", {"claim_holds": True, "evidence": "e"}))
+
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               _fake):
+        res = _backend(max_steps=1).run_worker(_spec(), tmp_path, 60)
+    assert res.verdict is not None
+    assert calls["n"] == 2  # forced attempt, then the plain retry
 
 
 def test_plain_text_json_is_accepted_as_a_fallback(tmp_path: Path) -> None:
