@@ -100,8 +100,21 @@ never fabricated. That is stricter than the post-fix triad, where the
 | Backend | offers | post-fix triad | design review |
 |---|---|---|---|
 | `claude_cli` / `ghost_cli` (subscription) | read + exec | 3 of 3 | **3 of 3** |
-| **`agentic_api`** (Kimi, GLM, DeepSeek, …) | read | **2 of 3** | **3 of 3** |
+| **`agentic_api`** (Kimi, GLM, DeepSeek, …) | read (+ exec when the operator allows it) | **2 of 3**, 3 with execution enabled | **3 of 3** |
 | `openai_compat` / `anthropic_api` | — | 1 of 3 | 0 of 3 |
+
+Measured on real endpoints, one design lens over a small module:
+
+| Provider | model | result |
+|---|---|---|
+| DeepSeek | `deepseek-chat` | pass, ~130 s |
+| GLM | `glm-4.6` | pass, ~186 s (needed the wind-down: it first spent every step reading) |
+| Kimi | `kimi-k3` | **3/3** with retries + `CRITIC_STREAM=1`; 2/3 before, the failure a 429 |
+
+Reasoning models are slow here (300-470 s for one lens) and their findings
+vary run to run — worth knowing before wiring one into a gate. For Kimi,
+set `CRITIC_STREAM=1`: a non-streaming request sits silent while the model
+thinks, which is what intermediaries reset.
 
 `agentic_api` drives those same OpenAI-compatible endpoints as a real agent loop
 with read-only filesystem tools, so the design lenses run on any provider with
