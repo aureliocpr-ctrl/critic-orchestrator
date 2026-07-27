@@ -28,11 +28,22 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, Protocol
 
-from .orchestrator import CriticReport, WorkerSpec
+from .orchestrator import WorkerSpec
 
 from .orchestrator import kill_process_tree
+
+
+class ReviewReport(Protocol):
+    """What the registry actually requires of a finished report.
+
+    Both `orchestrator.CriticReport` (vote-based) and
+    `design_workers.DesignReport` (findings-based) satisfy this. The
+    registry never inspects report internals — it only serializes.
+    """
+
+    def as_dict(self) -> dict[str, Any]: ...  # pragma: no cover
 
 JOB_TTL_S: float = 3600.0
 """How long terminal-state jobs are retained before being GC-ed."""
@@ -50,7 +61,7 @@ class Job:
     status: str  # "running" | "done" | "failed" | "cancelled"
     started_at: float
     ended_at: float | None = None
-    report: CriticReport | None = None
+    report: ReviewReport | None = None
     error: str | None = None
     popen_handles: list[subprocess.Popen[bytes]] = field(default_factory=list)
     # Cancellation flag. Set by JobRegistry.cancel BEFORE iterating
@@ -123,7 +134,7 @@ class JobRegistry:
             self._gc_expired_locked()
             return self._jobs.get(job_id)
 
-    def mark_done(self, job: Job, report: CriticReport) -> None:
+    def mark_done(self, job: Job, report: ReviewReport) -> None:
         with self._lock:
             if job.is_terminal:
                 return

@@ -44,6 +44,7 @@ from mcp.server.stdio import stdio_server
 
 from .backends import make_backend_from_env
 from .default_workers import build_default_workers
+from .design_workers import aggregate_design_report, build_design_workers
 from .job_registry import Job, JobRegistry
 from .orchestrator import adversarial_review
 
@@ -186,6 +187,71 @@ def _cancel_review_tool() -> t.Tool:
     )
 
 
+def _start_design_tool() -> t.Tool:
+    return t.Tool(
+        name="start_design_review",
+        description=(
+            "Adversarial DESIGN review of modules or plans — BEFORE or "
+            "WITHOUT a fix claim. Three read-only reviewers (premortem: "
+            "'it has failed, reconstruct the post-mortem'; perimeter: "
+            "category errors, is this the right problem; detection: can "
+            "each declared safeguard actually fire, and who would notice "
+            "its silent death) read the files RAW. Deliberately accepts "
+            "NO claim/diff from the proposer: a proposer-written claim "
+            "defines the review perimeter and captures the reviewers. "
+            "Returns a job_id immediately; poll with "
+            "poll_adversarial_review, abort with "
+            "cancel_adversarial_review."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "module_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "description": (
+                        "Files or directories to review, relative to "
+                        "project_dir (or absolute). Passed to the "
+                        "reviewers raw."
+                    ),
+                },
+                "design_doc": {
+                    "type": "string",
+                    "description": (
+                        "Optional path to a design document to review "
+                        "alongside (or instead of finished) code."
+                    ),
+                },
+                "error_grid": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional override of the built-in historical "
+                        "failure-class grid. The grid is ADDITIVE — it "
+                        "extends the reviewers' search, never limits it."
+                    ),
+                },
+                "project_dir": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the project root. Workers run "
+                        "with this as cwd. Defaults to $PWD."
+                    ),
+                },
+                "timeout_s": {
+                    "type": "integer",
+                    "minimum": 60, "maximum": 600, "default": 300,
+                    "description": (
+                        "Per-worker subprocess timeout (server-side)."
+                    ),
+                },
+            },
+            "required": ["module_paths"],
+        },
+    )
+
+
 def _list_reviews_tool() -> t.Tool:
     return t.Tool(
         name="list_adversarial_reviews",
@@ -203,6 +269,7 @@ async def _list_tools() -> list[t.Tool]:
     return [
         _force_review_tool(),
         _start_review_tool(),
+        _start_design_tool(),
         _poll_review_tool(),
         _cancel_review_tool(),
         _list_reviews_tool(),
@@ -239,6 +306,73 @@ def _parse_common(arguments: dict[str, Any]) -> dict[str, Any] | str:
         "timeout_s": timeout_s,
         "workers": workers,
     }
+
+
+def _parse_design(arguments: dict[str, Any]) -> dict[str, Any] | str:
+    """Validate start_design_review inputs. Returns parsed values or an
+    error string. Fail-fast on missing paths: a 3-worker review against
+    files that do not exist would burn minutes to report nothing.
+    """
+    raw_paths = arguments.get("module_paths")
+    if not isinstance(raw_paths, list) or not raw_paths:
+        return "module_paths (non-empty array) is required"
+    module_paths = [str(p).strip() for p in raw_paths if str(p).strip()]
+    if not module_paths:
+        return "module_paths (non-empty array) is required"
+    project_dir = Path(arguments.get("project_dir") or os.getcwd()).resolve()
+    missing = [
+        p for p in module_paths
+        if not (Path(p) if Path(p).is_absolute()
+                else project_dir / p).exists()
+    ]
+    if missing:
+        return f"module_paths not found under {project_dir}: {missing}"
+    design_doc = arguments.get("design_doc") or None
+    error_grid = arguments.get("error_grid") or None
+    if error_grid is not None and not isinstance(error_grid, list):
+        return "error_grid must be an array of strings"
+    timeout_s = int(arguments.get("timeout_s") or 300)
+    timeout_s = max(60, min(600, timeout_s))
+    workers = build_design_workers(
+        module_paths=module_paths,
+        design_doc=str(design_doc) if design_doc else None,
+        error_grid=error_grid,
+    )
+    return {
+        "target": ", ".join(module_paths),
+        "project_dir": project_dir,
+        "timeout_s": timeout_s,
+        "workers": workers,
+    }
+
+
+def _run_design_in_thread(job: Job, backend: Any | None = None) -> None:
+    """Background body for a design-review job: same lifecycle contract
+    as `_run_review_in_thread`, but the raw worker verdicts are folded
+    into a findings-based DesignReport (a design review has no binary
+    claim to vote on).
+    """
+    try:
+        report = adversarial_review(
+            claim=job.claim,  # registry label only — never in prompts
+            project_dir=job.project_dir,
+            workers=job.workers,
+            timeout=job.timeout_s,
+            popen_sink=job.popen_handles,
+            cancel_check=lambda: job.aborted,
+            backend=backend,
+        )
+        design = aggregate_design_report(
+            report, target=job.claim.removeprefix("design_review: "),
+        )
+    except Exception as exc:
+        _REGISTRY.mark_failed(job, f"design orchestrator error: {exc!r}")
+        return
+    except BaseException as exc:  # pragma: no cover - signal path
+        _REGISTRY.mark_failed(job, f"interrupted: {type(exc).__name__}")
+        raise
+    if not job.is_terminal:
+        _REGISTRY.mark_done(job, design)  # duck-typed .as_dict()
 
 
 def _run_review_in_thread(job: Job, backend: Any | None = None) -> None:
@@ -326,6 +460,26 @@ async def _call_tool_impl(
         # this handler until the review finishes. The job's terminal
         # state is set by _run_review_in_thread itself; poll reads it.
         _EXECUTOR.submit(_run_review_in_thread, job, backend)
+        return [t.TextContent(type="text",
+                               text=json.dumps(job.as_dict()))]
+
+    if name == "start_design_review":
+        parsed = _parse_design(arguments)
+        if isinstance(parsed, str):
+            return [t.TextContent(type="text",
+                                   text=json.dumps({"error": parsed}))]
+        try:
+            backend = make_backend_from_env()
+        except ValueError as exc:
+            return [t.TextContent(type="text",
+                                   text=json.dumps({"error": str(exc)}))]
+        job = _REGISTRY.create(
+            claim=f"design_review: {parsed['target']}",
+            project_dir=parsed["project_dir"],
+            workers=parsed["workers"],
+            timeout_s=parsed["timeout_s"],
+        )
+        _EXECUTOR.submit(_run_design_in_thread, job, backend)
         return [t.TextContent(type="text",
                                text=json.dumps(job.as_dict()))]
 
