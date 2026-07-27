@@ -324,16 +324,28 @@ def _refusal_reason(command: str) -> str | None:
     measured to miss `python -c` and blocklists only ever learn the
     payload someone already thought of.
     """
-    for p in _REFUSED_PATTERNS:
-        if p.search(command):
-            return ("matched a refused pattern (setup, destructive, "
-                    f"outbound, or shell-reintroducing): {p.pattern}")
     try:
         argv = _split_command(command)
     except ValueError as exc:
         return f"unparseable command: {exc}"
     if not argv:
         return "empty command"
+    # BOTH VIEWS. The blocklist used to match only the raw string while
+    # the executor ran the tokenised argv, and a second review proved the
+    # gap: `pip "install" evil` carries a quote between the two words, so
+    # \bpip\s+install\b misses it — and the tokeniser then strips the
+    # quotes and hands `pip install evil` to the runner. Checking one
+    # representation and executing another is the defect itself, so the
+    # normalised argv is checked too. Raw stays: shell metacharacters can
+    # live where tokenisation would hide them.
+    normalized = " ".join(argv)
+    for p in _REFUSED_PATTERNS:
+        for view, label in ((command, "as written"),
+                            (normalized, "once tokenised")):
+            if p.search(view):
+                return ("matched a refused pattern (setup, destructive, "
+                        f"outbound, or shell-reintroducing) {label}: "
+                        f"{p.pattern}")
     head = Path(argv[0]).name
     if head.lower().endswith(".exe"):
         head = head[:-4]

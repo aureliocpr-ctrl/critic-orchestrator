@@ -455,3 +455,46 @@ def test_an_operator_can_name_a_variable_to_pass_through(
     text = out.get("output") or ""
     assert "MODE=offline" in text, text
     assert "SECRET=None" in text, text
+
+
+# ---------------------------------------------------------------------------
+# FOURTH CRITICAL (DeepSeek, round 2 — on the code the first three had
+# already been cured in), verified before curing: the blocklist matched the
+# RAW command string while the executor used the TOKENISED argv.
+# `pip "install" evil` carries a quote between the two words, so
+# \bpip\s+install\b misses it — and _split_command then strips the quotes
+# and hands `pip install evil` to the runner. Checking one representation
+# and executing another IS the defect; the cure is to check both views.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("payload", [
+    'pip "install" evil',
+    "pip 'install' evil",
+    'git "push" origin main',
+    'npm "install" evil',
+    'poetry "add" evil',
+    '"sudo" apt-get install evil',
+    'conda "install" evil',
+])
+def test_quoting_cannot_hide_a_refused_command(
+        tmp_path: Path, payload: str) -> None:
+    (tmp_path / "README.md").write_text(f"```bash\n{payload}\n```\n")
+    assert [p.command for p in extract_promises(tmp_path)] == []
+    out = run_promise(
+        Promise(command=payload, kind="doc_command", source="README.md"),
+        tmp_path, timeout_s=20)
+    assert out["exit_code"] != 0
+    assert "refused" in (out.get("output") or "").lower()
+
+
+def test_both_views_of_a_command_are_checked() -> None:
+    """The invariant, stated directly: what the executor will run must be
+    what the blocklist saw."""
+    from critic_orchestrator.product_probe import (
+        _refusal_reason,
+        _split_command,
+    )
+    for cmd in ('pip "install" x', 'git "push" origin', 'npm "i" x'):
+        assert _refusal_reason(cmd) is not None, cmd
+        argv = _split_command(cmd)
+        assert {"install", "push", "i"} & set(argv), argv

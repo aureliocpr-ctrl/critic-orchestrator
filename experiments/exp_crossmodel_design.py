@@ -101,26 +101,44 @@ def _run_one(provider: str, domain: str) -> int:
               flush=True)
         return 1
     print(f"[{provider}] job {job_id} running…", flush=True)
-    deadline = time.time() + 2400
+    # Measured spread on the same target: 213 s and 1083 s for the SAME
+    # provider on two runs, 737 s and >2400 s for Kimi. A budget tight
+    # enough to expire turns a slow reviewer into a silent "found
+    # nothing", which is the worst way to be wrong about a review.
+    budget = float(os.environ.get("CRITIC_POLL_BUDGET_S") or 5400)
+    deadline = time.time() + budget
     last: dict = {}
+    timed_out = True
     while time.time() < deadline:
         last = _call("poll_adversarial_review", {"job_id": job_id})
         if last.get("status") in ("done", "failed", "cancelled"):
+            timed_out = False
             break
         time.sleep(15)
     dur = time.time() - t0
     RESULTS.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS / f"{provider}_{domain}.json"
     payload = {"provider": provider, "model": model, "domain": domain,
-               "duration_s": round(dur, 1), "poll": last}
+               "duration_s": round(dur, 1), "poll": last,
+               "poll_budget_expired": timed_out}
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if timed_out:
+        # NEVER let this read as a clean review: an empty by_severity from
+        # an unfinished job looks exactly like "no findings".
+        print(f"[{provider}] NO RESULT — poll budget ({budget:.0f}s) "
+              f"expired after {dur:.0f}s with the job still "
+              f"'{last.get('status')}'. This is NOT a verdict; raise "
+              "CRITIC_POLL_BUDGET_S and re-run.", flush=True)
+        return 3
     result = last.get("result") or {}
     sev = result.get("by_severity") or {}
-    lenses_ok = sum(1 for w in (result.get("lenses") or [])
-                    if w.get("ok")) if result.get("lenses") else None
+    ok = result.get("lenses_ok") or []
+    failed = result.get("lenses_failed") or []
     print(f"[{provider}] {last.get('status')} in {dur:.0f}s — "
           f"status={result.get('status')} by_severity={sev} "
-          f"lenses_ok={lenses_ok}", flush=True)
+          f"lenses_ok={len(ok)}/{len(ok) + len(failed)} "
+          f"{'(failed: ' + ','.join(failed) + ')' if failed else ''}",
+          flush=True)
     return 0
 
 
@@ -136,12 +154,34 @@ def _aggregate(domain: str) -> int:
 
     print("\n=== PER PROVIDER ===")
     all_findings: list[tuple[str, dict]] = []
+    incomplete: list[str] = []
     for row in rows:
         result = (row.get("poll") or {}).get("result") or {}
         sev = result.get("by_severity") or {}
+        # INFERRED, not just read from a flag: a result file written by an
+        # older harness has no `poll_budget_expired`, and a job whose
+        # status never reached a terminal state is unfinished whatever the
+        # file says. Deriving it from the data cannot go stale.
+        poll_status = (row.get("poll") or {}).get("status")
+        if row.get("poll_budget_expired") or \
+                poll_status not in ("done", "failed", "cancelled"):
+            incomplete.append(
+                f"{row['provider']} (unfinished — last status "
+                f"{poll_status!r})")
+            print(f"{row['provider']:9s} {row['model']:14s} "
+                  f"{row['duration_s']:7.0f}s  NO RESULT — the job never "
+                  f"reached a terminal state (last: {poll_status!r}). "
+                  "Not a verdict.")
+            continue
+        failed = result.get("lenses_failed") or []
+        if failed:
+            incomplete.append(
+                f"{row['provider']} ({len(failed)} lens(es) failed: "
+                f"{','.join(failed)})")
         print(f"{row['provider']:9s} {row['model']:14s} "
               f"{row['duration_s']:7.0f}s  status={result.get('status')}  "
-              f"{sev}")
+              f"{sev}" + (f"  LENSES FAILED: {','.join(failed)}"
+                          if failed else ""))
         for f in result.get("findings") or []:
             all_findings.append((row["provider"], f))
 
@@ -168,6 +208,14 @@ def _aggregate(domain: str) -> int:
                if f.get("severity") in ("critical", "high"))
     print(f"\ntotal findings: {len(all_findings)}  "
           f"critical+high: {crit}  files touched: {len(by_file)}")
+    if incomplete:
+        # The coverage caveat belongs NEXT TO the number, not in a log
+        # nobody re-reads: "0 criticals" from a review that did not finish
+        # is not evidence of anything.
+        print("\n!! COVERAGE IS PARTIAL — these did not deliver a full "
+              "review, so a low finding count from them means nothing:")
+        for item in incomplete:
+            print(f"   - {item}")
     print(f"artifacts in {RESULTS}")
     return 0
 
