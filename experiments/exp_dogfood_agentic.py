@@ -252,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in wanted:
         try:
             PHASES[name](root, keys)
-        except Exception as exc:  # noqa: BLE001 — a phase must not stop the run
+        except Exception as exc:
             print(f"[{name}] PHASE CRASHED: {type(exc).__name__}: {exc}",
                   flush=True)
     print("\ndone", flush=True)

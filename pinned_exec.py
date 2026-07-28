@@ -49,10 +49,11 @@ import subprocess
 import sys
 import tempfile
 import threading
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .orchestrator import kill_process_tree
 
@@ -198,10 +199,8 @@ def ephemeral_worktree(repo: Path, ref: str = "HEAD") -> Iterator[Path]:
             _run_git(["worktree", "remove", "--force", str(target)],
                      repo, "removing the worktree")
         except PinnedExecError:
-            try:
+            with suppress(PinnedExecError):
                 _run_git(["worktree", "prune"], repo, "pruning worktrees")
-            except PinnedExecError:
-                pass
         shutil.rmtree(container, ignore_errors=True)
         # `ignore_errors=True` is the right call — a locked file must not
         # turn a finished review into an exception — but swallowing the
@@ -263,7 +262,7 @@ def run_pinned(
 
     t0 = _time.perf_counter()
     try:
-        proc = subprocess.Popen(  # noqa: S603 — argv list, shell=False
+        proc = subprocess.Popen(
             cmd.argv, cwd=str(cwd), stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
             shell=False, text=True, encoding="utf-8", errors="replace",

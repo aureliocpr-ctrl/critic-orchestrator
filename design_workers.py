@@ -47,19 +47,19 @@ vote: a design review has no claim to hold or fail.
 """
 from __future__ import annotations
 
+import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
-import subprocess
+from typing import Any
 
-from .default_workers import _sanitize_for_prompt, _UNTRUSTED_HEADER
+from .default_workers import _UNTRUSTED_HEADER, _sanitize_for_prompt
 from .orchestrator import (
     CriticReport,
     WorkerSpec,
     WorkerVerdict,
     adversarial_review,
 )
-
 
 # ---------------------------------------------------------------------------
 # Historical failure-class grid
@@ -592,7 +592,7 @@ def aggregate_design_report(
         (merged[k] for k in order),
         key=lambda f: sev_rank[f["severity"]],
     )
-    by_severity = {s: 0 for s in _SEVERITIES}
+    by_severity = dict.fromkeys(_SEVERITIES, 0)
     for f in findings:
         by_severity[f["severity"]] += 1
 

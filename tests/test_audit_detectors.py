@@ -235,6 +235,7 @@ def test_audit_is_reachable_as_an_mcp_tool(tmp_path: Path) -> None:
     this very module was written to detect."""
     import asyncio
     import json as _json
+
     from critic_orchestrator import mcp_server
 
     tools = asyncio.run(mcp_server._list_tools())
@@ -255,6 +256,7 @@ def test_audit_is_reachable_as_an_mcp_tool(tmp_path: Path) -> None:
 def test_audit_tool_reports_missing_dir_as_error() -> None:
     import asyncio
     import json as _json
+
     from critic_orchestrator import mcp_server
     result = asyncio.run(mcp_server._call_tool_impl("run_repo_audit", {
         "project_dir": "C:/definitely/not/here/xyzzy",

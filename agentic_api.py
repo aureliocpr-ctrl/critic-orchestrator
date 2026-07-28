@@ -51,6 +51,7 @@ import secrets
 import time
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -339,7 +340,7 @@ def _tool_fs_glob(args: dict, root: Path, nonce: str = "") -> str:
     return _frame("GLOB_RESULT", f"pattern={pattern}", body, nonce)
 
 
-def _grep_stream(p: Path, rx: "re.Pattern[str]", rel: str,
+def _grep_stream(p: Path, rx: re.Pattern[str], rel: str,
                  hits: list[str]) -> bool:
     """Scan one file line-wise under the byte caps. Returns True iff the
     file was FULLY scanned.
@@ -437,7 +438,7 @@ def _run_tool(name: str, args: dict, root: Path,
     if extra and name in extra:
         try:
             return str(extra[name](args))
-        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+        except Exception as exc:
             return f"error: {type(exc).__name__}: {exc}"
     fn = _TOOLS.get(name)
     if fn is None:
@@ -531,9 +532,9 @@ class _ExecGrant:
     timeout_s: int
 
 
-def _format_probe(probe: "_pinned.FalsificationProbe") -> str:
+def _format_probe(probe: _pinned.FalsificationProbe) -> str:
     """Render both halves of the experiment as plain observed facts."""
-    def half(label: str, res: "_pinned.PinnedResult") -> str:
+    def half(label: str, res: _pinned.PinnedResult) -> str:
         combined = res.stdout or ""
         if res.stderr:
             combined += "\n[stderr]\n" + res.stderr
@@ -841,10 +842,8 @@ class AgenticApiBackend:
         except urllib.error.HTTPError as exc:
             if exc.code in _RETRY_STATUSES:
                 detail = ""
-                try:
+                with suppress(Exception):  # body may already be consumed
                     detail = exc.read().decode()[:200]
-                except Exception:  # pragma: no cover - body consumed
-                    pass
                 raise _Transient(
                     f"http {exc.code}: {exc.reason} {detail}".strip(),
                     _retry_after_seconds(exc),
@@ -889,7 +888,7 @@ class AgenticApiBackend:
 
     def _exec_grant_for(
         self, spec: WorkerSpec, project_dir: Path,
-    ) -> tuple["_ExecGrant | None", str | None]:
+    ) -> tuple[_ExecGrant | None, str | None]:
         """Decide the "exec" capability for THIS (worker, project) pair.
 
         Returns (grant, None) or (None, denial). The denial travels into
@@ -920,7 +919,7 @@ class AgenticApiBackend:
             baseline_ref=req.baseline_ref, timeout_s=req.timeout_s,
         ), None
 
-    def _make_exec_tool(self, grant: "_ExecGrant", nonce: str) -> Any:
+    def _make_exec_tool(self, grant: _ExecGrant, nonce: str) -> Any:
         """The no-argument falsification tool, one-shot per run.
 
         One-shot because the experiment is deterministic for a given
@@ -1055,8 +1054,13 @@ class AgenticApiBackend:
                 trace.append(f"step{steps}:forced-submit_verdict")
             if self.temperature is not None:
                 body["temperature"] = self.temperature
-            def _ctx_trace() -> str:
-                return (f"step={steps} ctx_msgs={len(messages)} "
+            # `step` is a PARAMETER, not a capture. Defined inside the
+            # loop, it closed over `steps` by reference: harmless while
+            # every call happens in the same iteration, and quietly wrong
+            # the day someone keeps the callable to use later. Binding it
+            # costs nothing and removes the trap.
+            def _ctx_trace(step: int = steps) -> str:
+                return (f"step={step} ctx_msgs={len(messages)} "
                         f"ctx_bytes={_ctx_bytes(messages)} | "
                         + " | ".join(trace))
 
@@ -1093,10 +1097,8 @@ class AgenticApiBackend:
                         )
                 else:
                     detail = ""
-                    try:
+                    with suppress(Exception):  # body may already be consumed
                         detail = exc.read().decode()[:200]
-                    except Exception:  # pragma: no cover - body consumed
-                        pass
                     return BackendResult(
                         verdict=None,
                         error=f"http {exc.code}: {exc.reason} {detail}".strip(),
@@ -1170,8 +1172,11 @@ class AgenticApiBackend:
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
                     if not isinstance(args, dict):
-                        raise ValueError("arguments is not an object")
-                except (json.JSONDecodeError, ValueError) as exc:
+                        # TypeError, not ValueError: the payload parsed
+                        # fine and is the wrong TYPE. Caught below either
+                        # way — the distinction is for whoever reads it.
+                        raise TypeError("arguments is not an object")
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.get("id", ""),

@@ -50,9 +50,8 @@ import re
 
 from .orchestrator import ExecRequest, WorkerSpec
 
-
 _MAX_USER_FIELD_CHARS: int = 4096
-_CONTROL_CHARS_RE: "re.Pattern[str]" = re.compile(
+_CONTROL_CHARS_RE: re.Pattern[str] = re.compile(
     # All C0 control chars except tab and newline, plus DEL and the
     # C1 range. These let an attacker mask text (ANSI escape sequences
     # start with ESC=\x1b) or smuggle null bytes through downstream

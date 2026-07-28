@@ -47,15 +47,17 @@ real spend.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
 import os
 import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from itertools import count
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .backends import BackendResult
 from .orchestrator import WorkerSpec, kill_process_tree
@@ -126,10 +128,8 @@ def close_all_sisters() -> None:
         procs = list(_LIVE.values())
         _LIVE.clear()
     for proc in procs:
-        try:
+        with contextlib.suppress(Exception):
             kill_process_tree(proc)
-        except Exception:  # noqa: BLE001 — sweep must reach every sister
-            pass
 
 
 atexit.register(close_all_sisters)

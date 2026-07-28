@@ -49,7 +49,6 @@ from .design_workers import aggregate_design_report, build_design_workers
 from .job_registry import Job, JobRegistry
 from .orchestrator import adversarial_review
 
-
 server: Server = Server("critic-orchestrator")
 
 # Module-level registry shared by all async-job tools. Tests reset this

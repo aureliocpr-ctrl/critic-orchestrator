@@ -68,7 +68,7 @@ class _StreamResponse:
     def __iter__(self):
         return iter(self._lines)
 
-    def __enter__(self) -> "_StreamResponse":
+    def __enter__(self) -> _StreamResponse:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -183,9 +183,9 @@ def test_empty_stream_yields_an_empty_message() -> None:
 # ---------------------------------------------------------------------------
 
 def _backend(**kw: Any) -> AgenticApiBackend:
-    defaults = dict(base_url="https://api.example.com", api_key="k",
-                    model="kimi-k3", max_steps=6, stream=True,
-                    require_investigation=False)
+    defaults = {"base_url": "https://api.example.com", "api_key": "k",
+                    "model": "kimi-k3", "max_steps": 6, "stream": True,
+                    "require_investigation": False}
     defaults.update(kw)
     return AgenticApiBackend(**defaults)  # type: ignore[arg-type]
 

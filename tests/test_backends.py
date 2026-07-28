@@ -46,7 +46,7 @@ class _FakeResp:
     def read(self) -> bytes:
         return self._raw
 
-    def __enter__(self) -> "_FakeResp":
+    def __enter__(self) -> _FakeResp:
         return self
 
     def __exit__(self, *_a) -> bool:
@@ -54,7 +54,7 @@ class _FakeResp:
 
 
 def _capturing_urlopen(payload: dict, captured: dict):
-    def _fake(req, timeout=None):  # noqa: ARG001
+    def _fake(req, timeout=None):
         captured["url"] = req.full_url
         captured["headers"] = dict(req.header_items())
         captured["body"] = json.loads(req.data.decode("utf-8"))
@@ -271,7 +271,7 @@ def test_openai_compat_falls_back_from_json_schema(tmp_path: Path) -> None:
     ok = {"choices": [{"message": {"content": json.dumps({"claim_holds": True})}}]}
     formats: list = []
 
-    def _fake(req, timeout=None):  # noqa: ARG001
+    def _fake(req, timeout=None):
         body = json.loads(req.data.decode("utf-8"))
         rf = body.get("response_format")
         formats.append(rf.get("type") if rf else None)
@@ -296,7 +296,7 @@ def test_openai_compat_non_format_400_does_not_fall_back(tmp_path: Path) -> None
     immediately, not silently retry with a different format."""
     calls = {"n": 0}
 
-    def _fake(req, timeout=None):  # noqa: ARG001
+    def _fake(req, timeout=None):
         calls["n"] += 1
         raise urllib.error.HTTPError(
             req.full_url, 401, "Unauthorized", {},

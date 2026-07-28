@@ -65,5 +65,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install ruff
+      # PINNED. The first CI run installed whatever was latest (0.16.0),
+      # whose default rule set is wider than the locally installed
+      # 0.15.10's — so a tree called clean locally arrived with 85
+      # violations. The rules now live in pyproject and the version is
+      # fixed here: "clean" is a property of the code, not of the day
+      # the check ran. Bump it deliberately, as a commit.
+      - run: python -m pip install "ruff==0.16.0"
       - run: ruff check .

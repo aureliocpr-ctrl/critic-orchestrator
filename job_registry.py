@@ -30,9 +30,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
-from .orchestrator import WorkerSpec
-
-from .orchestrator import kill_process_tree
+from .orchestrator import WorkerSpec, kill_process_tree
 
 
 class ReviewReport(Protocol):

@@ -48,6 +48,48 @@ Issues = "https://github.com/aureliocpr-ctrl/critic-orchestrator/issues"
 packages = ["critic_orchestrator"]
 package-dir = {"critic_orchestrator" = "."}
 
+[tool.ruff]
+# WHY THIS SECTION EXISTS.
+# "ruff clean" was being claimed against whatever rule set the locally
+# installed ruff happened to default to. CI installed 0.16.0, which
+# widened those defaults, and reported 85 violations on a tree that a
+# local 0.15.10 called clean. The number moved because the TOOL moved,
+# not the code — so the selection is declared here and the version is
+# pinned in CI. An answer that changes with the day it was asked is not
+# a measurement.
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9", "F", # the classic defaults
+    "I",                   # import order
+    "UP",                  # pyupgrade
+    "B",                   # bugbear — catches the loop-variable capture
+    "C4", "PIE", "SIM", "FURB",
+    "RUF0", "RUF1", "RUF2",
+    "TRY004",
+]
+ignore = [
+    # AMBIGUOUS-UNICODE, and one of them is load-bearing. RUF001 wants
+    # `❯` replaced by `>` in ghost_backend — but that glyph IS the Claude
+    # CLI prompt this backend matches on to know the session is ready;
+    # "fixing" it would break readiness detection. The rest are `×` in
+    # "FMEA × STAMP", deliberate typography in prose.
+    "RUF001", "RUF002", "RUF003",
+]
+# NOT selected, deliberately, because the violations are the design and
+# silencing them one by one would add 35 noqa comments that say nothing:
+#   BLE001 / S110 — broad `except` around cleanup, sweeps and header
+#     parsing. Each one is commented where it sits: this code must not
+#     let a locked file or an exotic response abort a finished review.
+#   PLW1510 — subprocess.run without check=True: the exit code IS the
+#     observation here (a failing test is the expected outcome), so
+#     raising on it would be backwards.
+#   PYI034 — test doubles whose __enter__ returns a narrowed type.
+#   N999 — the package dir maps to ".", so this fires on the CHECKOUT
+#     directory name, which is `critic-orchestrator` on CI. A finding
+#     about the clone path is not a finding about the code.
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

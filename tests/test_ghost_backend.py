@@ -76,7 +76,7 @@ class FakeSession:
             # The real sister reads the prompt file and writes the verdict
             # to the response path named inside it. Mimic that.
             text = prompt_path.read_text(encoding="utf-8")
-            m = re.search(r"^\s*(\S+_response\.json)\s*$", text, re.M)
+            m = re.search(r"^\s*(\S+_response\.json)\s*$", text, re.MULTILINE)
             assert m, "prompt file must name the response path"
             Path(m.group(1)).write_text(self.response, encoding="utf-8")
         return True
@@ -245,7 +245,7 @@ def test_registry_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
             proc = _FakeProc(1000 + i)
             ghost_backend._commit_slot(proc)
             ghost_backend._release_slot(proc)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     threads = [threading.Thread(target=_cycle, args=(i,)) for i in range(20)]

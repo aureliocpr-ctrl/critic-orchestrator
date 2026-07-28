@@ -32,9 +32,9 @@ import pytest
 from critic_orchestrator.agentic_api import (
     MAX_READ_BYTES,
     AgenticApiBackend,
-    _SandboxError,
     _resolve_in_sandbox,
     _run_tool,
+    _SandboxError,
 )
 from critic_orchestrator.backends import make_backend_from_env
 from critic_orchestrator.orchestrator import WorkerSpec
@@ -67,7 +67,7 @@ class _FakeResponse:
     def read(self) -> bytes:
         return self._body
 
-    def __enter__(self) -> "_FakeResponse":
+    def __enter__(self) -> _FakeResponse:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -103,8 +103,8 @@ class _Scripted:
 
 
 def _backend(**kw: Any) -> AgenticApiBackend:
-    defaults = dict(base_url="https://api.example.com", api_key="k",
-                    model="kimi-k3", max_steps=8)
+    defaults = {"base_url": "https://api.example.com", "api_key": "k",
+                    "model": "kimi-k3", "max_steps": 8}
     defaults.update(kw)
     return AgenticApiBackend(**defaults)  # type: ignore[arg-type]
 
@@ -184,7 +184,7 @@ def test_read_is_verified_after_open_not_only_before(tmp_path: Path) -> None:
     (tmp_path / "m.py").write_text("legit\n")
     real_stat = os.stat
 
-    def _stat_where_the_descriptor_differs(path, *a, **kw):  # noqa: ANN001
+    def _stat_where_the_descriptor_differs(path, *a, **kw):
         st = real_stat(path, *a, **kw)
         # Only the POST-OPEN stat — the one taken on the file descriptor,
         # an int — reports a different identity. Path stats stay truthful,
@@ -1007,7 +1007,7 @@ def test_read_only_workers_run_on_the_agentic_backend_noinv(tmp_path: Path) -> N
         scripted = _Scripted([
             _assistant_tool_call(
                 "submit_verdict",
-                {k: (True if k.endswith("holds") or k.endswith("exists")
+                {k: (True if k.endswith(("holds", "exists"))
                      else ("x" if k != "caller_paths" and k != "findings"
                            and k != "confidence" else
                            (0.5 if k == "confidence" else [])))

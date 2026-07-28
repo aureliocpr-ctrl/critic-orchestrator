@@ -41,7 +41,6 @@ from critic_orchestrator.orchestrator import (
     kill_process_tree,
 )
 
-
 # ---------------------------------------------------------------------------
 # Cancel race against the spawn window
 # ---------------------------------------------------------------------------
@@ -414,9 +413,9 @@ def test_run_review_in_thread_reraises_base_exception(tmp_path: Path) -> None:
         workers=[_spec()], timeout_s=60,
     )
     with patch("critic_orchestrator.mcp_server.adversarial_review",
-               side_effect=KeyboardInterrupt("user pressed ^C")):
-        with pytest.raises(KeyboardInterrupt):
-            mcp_server._run_review_in_thread(job)
+               side_effect=KeyboardInterrupt("user pressed ^C")), \
+            pytest.raises(KeyboardInterrupt):
+        mcp_server._run_review_in_thread(job)
     assert job.status == "failed"
     assert "interrupted" in (job.error or "").lower()
 

@@ -35,13 +35,13 @@ import time
 from pathlib import Path
 
 from critic_orchestrator.design_workers import (
-    DEFAULT_ERROR_GRID,
     _DESIGN_SCHEMA,
     _DISCIPLINE_BLOCK,
+    DEFAULT_ERROR_GRID,
     _grid_block,
     _targets_block,
-    build_design_workers,
     aggregate_design_report,
+    build_design_workers,
 )
 from critic_orchestrator.orchestrator import WorkerSpec, adversarial_review
 

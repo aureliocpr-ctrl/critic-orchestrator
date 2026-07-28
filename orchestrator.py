@@ -20,13 +20,15 @@ OS process.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 try:
     import psutil  # type: ignore[import-not-found]
@@ -55,23 +57,17 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
         try:
             parent = psutil.Process(proc.pid)
             for child in parent.children(recursive=True):
-                try:
+                with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
                     child.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            try:
+            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
                 parent.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
             return
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
         except Exception:
             pass
-    try:
+    with contextlib.suppress(Exception):
         proc.kill()
-    except Exception:
-        pass
 
 
 @dataclass(frozen=True)
@@ -323,7 +319,7 @@ def _spawn_worker(
         )
 
     try:
-        proc = subprocess.Popen(  # noqa: S603 (argv list, no shell)
+        proc = subprocess.Popen(
             cmd,
             cwd=str(project_dir),
             stdout=subprocess.PIPE,
@@ -366,10 +362,8 @@ def _spawn_worker(
     # Now we tree-kill the just-spawned subprocess and bail out.
     if cancel_check is not None and cancel_check():
         kill_process_tree(proc)
-        try:
+        with contextlib.suppress(Exception):
             proc.communicate(timeout=5)
-        except Exception:
-            pass
         wall_ms = int((time.perf_counter() - t0) * 1000)
         _finalize("cancelled_post_spawn", None, 0.0, wall_ms)
         return WorkerVerdict(
@@ -387,10 +381,8 @@ def _spawn_worker(
         # the pipes; we discard the output since the worker exceeded
         # its budget.
         kill_process_tree(proc)
-        try:
+        with contextlib.suppress(Exception):
             proc.communicate(timeout=5)
-        except Exception:
-            pass
         wall_ms = int((time.perf_counter() - t0) * 1000)
         _finalize("timeout", f"after {timeout}s", 0.0, wall_ms)
         return WorkerVerdict(
@@ -592,6 +584,8 @@ def adversarial_review(
 
 
 __all__ = [
-    "WorkerSpec", "WorkerVerdict", "CriticReport",
+    "CriticReport",
+    "WorkerSpec",
+    "WorkerVerdict",
     "adversarial_review",
 ]

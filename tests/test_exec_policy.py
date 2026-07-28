@@ -229,6 +229,7 @@ def test_a_valid_root_still_works_alongside_a_typo(
         tmp_path, monkeypatch) -> None:
     """A stale entry must never disable the valid ones."""
     import os as _os
+
     from critic_orchestrator.exec_policy import policy_from_env
     good = tmp_path / "repo"
     good.mkdir()

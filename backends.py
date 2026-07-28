@@ -98,7 +98,7 @@ def _post_json(
         headers={**headers, "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8")
     return json.loads(raw)
 
@@ -347,9 +347,9 @@ def make_backend_from_env() -> Any | None:
 
 
 __all__ = [
+    "AnthropicAPIBackend",
     "BackendResult",
     "OpenAICompatibleBackend",
-    "AnthropicAPIBackend",
     "make_backend_from_env",
 ]
 

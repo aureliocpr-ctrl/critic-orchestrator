@@ -83,9 +83,10 @@ import shlex
 import sys
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .exec_policy import ExecPolicy
 from .pinned_exec import (
@@ -316,7 +317,7 @@ def _clean_line(line: str) -> str:
         if s.startswith(prefix):
             s = s[len(prefix):].strip()
             break
-    if s.startswith("#") or s.startswith("//"):
+    if s.startswith(("#", "//")):
         return ""
     # Trailing explanatory comment: `pytest -q   # 93 passed` — the command
     # is what precedes it. Only when preceded by whitespace, so a `#` that

@@ -137,30 +137,28 @@ def test_worktree_never_runs_git_stash(repo: Path) -> None:
     seen: list[list[str]] = []
     real_run = subprocess.run
 
-    def _spy(argv, *a, **kw):  # noqa: ANN001
+    def _spy(argv, *a, **kw):
         if isinstance(argv, list):
             seen.append(list(argv))
         return real_run(argv, *a, **kw)
 
-    with patch("critic_orchestrator.pinned_exec.subprocess.run", _spy):
-        with ephemeral_worktree(repo) as wt:
-            assert wt.exists()
+    with patch("critic_orchestrator.pinned_exec.subprocess.run", _spy), \
+            ephemeral_worktree(repo) as wt:
+        assert wt.exists()
     joined = [" ".join(c) for c in seen]
     assert not any("stash" in c for c in joined), joined
 
 
 def test_worktree_survives_an_exception_and_still_cleans_up(repo: Path) -> None:
-    with pytest.raises(RuntimeError):
-        with ephemeral_worktree(repo) as wt:
-            captured = wt
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), ephemeral_worktree(repo) as wt:
+        captured = wt
+        raise RuntimeError("boom")
     assert not captured.exists()
 
 
 def test_non_git_directory_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(PinnedExecError):
-        with ephemeral_worktree(tmp_path):
-            pass
+    with pytest.raises(PinnedExecError), ephemeral_worktree(tmp_path):
+        pass
 
 
 # ---------------------------------------------------------------------------
