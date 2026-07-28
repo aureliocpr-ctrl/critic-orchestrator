@@ -4,8 +4,17 @@
 > independent adversarial reviewers, in parallel, to check a claimed
 > fix — *before* you trust it. Provider- and agent-agnostic.
 
-**Status**: 75/75 tests green. Used daily in my own workflow; APIs beyond the
+**Status**: 406 tests green. Used daily in my own workflow; APIs beyond the
 Claude CLI backend are unit-tested and live-smoke-tested (see *Verified* below).
+
+**What it found in itself.** The strongest thing I can say about this tool is
+what happened when I pointed it at its own execution surface: four criticals in
+one night, each verified before it was cured, three of them found by a
+different model than the one before. All four were the same class — a defence
+enumerating what someone had already imagined, or inspecting a different
+representation than the one it protected. Details in the CHANGELOG, including
+the two cases where the *gate itself* reported "clean" over a finding it had
+just made.
 
 ---
 

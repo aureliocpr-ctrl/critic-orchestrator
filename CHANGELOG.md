@@ -1,5 +1,93 @@
 # Changelog
 
+## Unreleased — Four criticals, found by the product on itself
+
+The wirings below gave the product an execution surface. Running its own
+lenses over that surface — one design review, then the same three modules
+reviewed by DeepSeek, GLM and Kimi in parallel — found **four criticals in
+one night**, each verified before it was cured, three of them by a
+different model than the previous one.
+
+All four belong to **one class**: a defence that enumerates what someone
+already imagined, or that inspects a different representation than the one
+it protects.
+
+### Fixed (security)
+- **`python -c "<code>"` bypassed the blocklist entirely** — confirmed by
+  writing a canary file to disk. The previous commit had added the
+  shell-reintroduction class (`bash -c`, `cmd /c`) and missed the
+  interpreter this module itself maps to `sys.executable`. Cured with an
+  **allowlist of argv shapes** for interpreters, not another blocklist
+  entry: informational flags, `-m <dotted module>`, or a script file
+  resolving inside the tree — anything else refused without having had to
+  be imagined.
+- **Versioned interpreters walked through that allowlist** (DeepSeek) —
+  measured 6 bypasses of 9: `python3.11 -c`, `pypy3.10`, `ruby3.1`,
+  `php8.2`, `perl5.36`. The shape allowlist rested on an exact-**name**
+  frozenset, which is a blocklist one level down. Now matched as a family
+  (stem + optional version tail).
+- **Promises could read the server's API keys** (Kimi) — verified by
+  reading `sk-…` back out of a probe run. `run_pinned` copied `os.environ`
+  wholesale, so caller-chosen code received the operator's provider
+  credentials. Cured with `minimal_exec_env`: an allowlist of what a
+  process needs to *start*, plus a named operator escape hatch
+  (`CRITIC_EXEC_ENV_PASSTHROUGH`).
+- **The blocklist checked a different string than the executor ran**
+  (DeepSeek, on the already-cured code) — `pip "install" evil`,
+  `git "push" origin`, `npm "install" evil` all passed: the quote between
+  the words defeats `\bpip\s+install\b`, and the tokeniser then strips it
+  and hands the clean command to the runner. Both views are now checked.
+- **Windows paths were being corrupted before every containment
+  decision** — `shlex.split` defaults to POSIX mode, where `\` is an
+  escape, so `C:\tools\x.py` became `C:toolsx.py`. Found because a
+  containment test passed for the wrong reason.
+
+### Fixed (reliability)
+- **One silent turn was killing whole reviewers.** A measured round lost
+  **5 of 9 lenses** across three providers to one identical error with an
+  empty preview. The cause was the loop: any turn with neither a tool call
+  nor extractable JSON aborted the reviewer and discarded every step
+  already paid for — and a reasoning model legitimately produces such a
+  turn (content empty, everything in `reasoning_content`). Empty turns are
+  now nudged up to `_MAX_EMPTY_TURNS`, then still fail honestly;
+  `reasoning_content` length is traced so the next occurrence is
+  diagnosable.
+- **`fs_grep` streams instead of slurping** — a live grep over session logs
+  died with `MemoryError` because `read_text` loads whole files and a jsonl
+  log can be one multi-hundred-MB line. Per-file and per-line byte caps,
+  exact line numbers, partially-scanned files named.
+- **Collection errors are no longer read as falsification evidence.** The
+  test file is carried to the baseline with no import analysis, so a helper
+  introduced by the fix commit makes the baseline *error* — which a bare
+  "exit != 0" reads as the failure being looked for. pytest distinguishes
+  them (1 = ran and failed; 2/3/4/5 = never ran) and the probe was
+  discarding that; now surfaced with an explicit warning to the reviewer.
+- **Roots are no longer dropped silently** — a typo in `CRITIC_EXEC_ROOTS`
+  narrowed the policy invisibly; kept in `ExecPolicy.invalid_roots` and
+  named in both refusal messages.
+
+### Fixed (in the instruments themselves — same class, twice)
+- The dogfood gate printed *"all self-checks came back clean"* underneath a
+  CRITICAL, because `blocking_findings` was in its accepted-status list.
+- The cross-model aggregator printed `kimi … status=None {}`, which reads
+  exactly like "Kimi found nothing" when the truth was "my poll budget
+  expired while the job was still running". Unfinished jobs are now
+  inferred from the poll status, failed lenses are named per provider, and
+  a partial-coverage warning prints next to the totals — a low finding
+  count from an unfinished review is the worst way to be wrong about one.
+
+### Measured
+- Cross-model round on the same three modules, providers in parallel:
+  DeepSeek 213 s, GLM 407 s, Kimi 737 s; 32 findings, 13 critical/high.
+  **Model diversity was not redundant**: each critical came from a
+  different model and had been missed by the other two.
+- Same-target variance is large: DeepSeek 213 s and 1083 s on two runs of
+  the identical review. Budget accordingly.
+- False positives were measured too, not just findings: Kimi's
+  "`kind='doc_command'` bypasses the refusal" is **false** (all three kinds
+  refused); two GLM highs are detection-lens artifacts asking for runtime
+  observability of safeguards that unit tests already pin.
+
 ## Unreleased — The three wirings: execution reaches third-party providers
 
 The remaining residue was three instances of the same class this product
