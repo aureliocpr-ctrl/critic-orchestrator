@@ -1,0 +1,69 @@
+name: CI
+
+# WHY THIS EXISTS, LATE.
+# Until today this repository had no CI at all: 421 tests that had only
+# ever run on one machine, on Windows. The sibling project learned what
+# that costs — a fix that passed locally on Windows failed on five POSIX
+# runners, because it used a pid as proof of liveness and the fixture pid
+# was 1, which on Linux is init. A Windows-only suite cannot see that
+# class of defect, ever.
+#
+# It runs on EVERY branch, not only main. Same project learned that one
+# too: a workflow scoped to main let 240 commits accumulate without a
+# single CI run, and the bill arrived all at once.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  # A new push supersedes an in-flight run on the same ref.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # one platform failing must not hide the others
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The falsification probe and the product probe build real git
+          # worktrees from real commits: a shallow clone has no history
+          # to check out a baseline from.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: git identity (the probes create commits in temp repos)
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "ci"
+          git config --global init.defaultBranch main
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Test
+        run: python -m pytest tests -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ruff
+      - run: ruff check .
