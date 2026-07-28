@@ -1,0 +1,78 @@
+name: Publish to PyPI (Trusted Publishing — no token)
+
+# Publishes `critic-orchestrator` on a version tag using PyPI **Trusted
+# Publishing** (OpenID Connect). NO API token is stored, typed, or pasted
+# anywhere — GitHub proves the workflow's identity to PyPI over OIDC. Same
+# arrangement already used by `verimem`.
+#
+# ONE-TIME setup on PyPI (a web form, NOT a token):
+#   pypi.org → account → Publishing → "Add a pending publisher":
+#     PyPI Project Name : critic-orchestrator
+#     Owner             : aureliocpr-ctrl
+#     Repository name   : critic-orchestrator
+#     Workflow name     : publish.yml
+#     Environment name  : (leave blank)
+#
+# After that, publishing is:  git push origin v0.8.0
+# (or Actions tab → "Run workflow", which is what to use when the tag is
+# already pushed, as v0.8.0 is.)
+#
+# The build runs in CI, from a clean checkout — which also removes the
+# packaging trap found while preparing 0.8.0 by hand: a stale local
+# `build/` or `*.egg-info/` silently re-added the test files from its own
+# SOURCES.txt, and the rebuilt wheel weighed the same while its filename
+# said the new version. A fresh runner cannot carry that state.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # REQUIRED for OIDC trusted publishing
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the test suite before shipping anything
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pytest tests -q
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Check artifacts
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+
+      - name: The wheel must not ship the test suite
+        # Verified as an artifact, not as an intention: the tests carry
+        # literal security payloads and have no business in anyone's
+        # site-packages. This failed by hand once, from a stale build dir.
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, wheels
+          names = zipfile.ZipFile(wheels[0]).namelist()
+          shipped = [n for n in names if "/tests/" in n or n.endswith("/tests")]
+          if shipped:
+              sys.exit(f"wheel ships {len(shipped)} test file(s): {shipped[:5]}")
+          print(f"OK: {len(names)} files, no tests")
+          PY
+
+      - name: Publish to PyPI (OIDC — no token)
+        uses: pypa/gh-action-pypi-publish@release/v1
