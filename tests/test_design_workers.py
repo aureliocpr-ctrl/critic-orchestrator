@@ -445,3 +445,51 @@ def test_start_design_review_requires_module_paths(tmp_path: Path) -> None:
         "module_paths": [], "project_dir": str(tmp_path),
     })
     assert "error" in resp
+
+
+# --------------------------------------------------------------------------
+# THE DIAGNOSTIC MUST REACH THE READER. Third instance tonight of one class:
+# an instrument that gathers a signal and drops it before anyone can see it.
+# The backend builds a step-by-step trace precisely so a failed lens is
+# explainable — and as_dict() serialised name/ok/error and threw the trace
+# away. When 5 of 9 lenses failed in a measured round, the explanation
+# existed inside the backend and never reached the report; the diagnosis
+# came from the error string alone, which was luck.
+# --------------------------------------------------------------------------
+
+def test_a_failed_lens_carries_its_trace_into_the_report() -> None:
+    dead = WorkerVerdict(
+        name="detection", verdict=None,
+        error="step budget exhausted after 20 steps without a verdict",
+        cost_usd=0.0, duration_ms=999,
+        raw_stdout_preview="step=20 ctx_msgs=41 | step1:fs_read(a.py) "
+                           "| step2:empty-turn1(reasoning 812ch)",
+    )
+    rep = aggregate_design_report(_report([dead]), target="m.py").as_dict()
+    worker = next(w for w in rep["workers"] if w["name"] == "detection")
+    assert "trace" in worker, worker.keys()
+    assert "empty-turn1" in worker["trace"]
+    assert "step1:fs_read(a.py)" in worker["trace"]
+
+
+def test_a_successful_lens_carries_its_trace_too() -> None:
+    """Comparing a healthy run against a failed one IS the diagnostic;
+    keeping the trace only on failure makes that comparison impossible."""
+    ok = _verdict("premortem", [_finding("x", "low")])
+    ok.raw_stdout_preview = "step=4 ctx_msgs=9 | step1:fs_read(a.py)"
+    rep = aggregate_design_report(_report([ok]), target="m.py").as_dict()
+    worker = next(w for w in rep["workers"] if w["name"] == "premortem")
+    assert "step1:fs_read(a.py)" in worker.get("trace", "")
+
+
+def test_the_trace_is_bounded() -> None:
+    """A trace is a diagnostic, not a payload: 20 steps of tool calls
+    must not turn one failed lens into a wall of text."""
+    noisy = WorkerVerdict(
+        name="detection", verdict=None, error="boom",
+        cost_usd=0.0, duration_ms=1,
+        raw_stdout_preview="x" * 20_000,
+    )
+    rep = aggregate_design_report(_report([noisy]), target="m.py").as_dict()
+    worker = next(w for w in rep["workers"] if w["name"] == "detection")
+    assert len(worker["trace"]) <= 2_100, len(worker["trace"])

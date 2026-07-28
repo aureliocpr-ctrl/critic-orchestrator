@@ -160,6 +160,11 @@ _READONLY_TOOLS = ("--allowedTools", "Read Grep Glob")
 
 _SEVERITIES = ("critical", "high", "medium", "low")
 
+#: Cap on the per-lens execution trace carried into the report. Long
+#: enough for 20 steps of tool calls with their targets; short enough
+#: that one chatty lens cannot bury the findings under its own log.
+_MAX_TRACE_CHARS: int = 2_000
+
 
 def _grid_block(error_grid: list[dict[str, str]] | list[str]) -> str:
     """Render the failure-class grid as an additive search aid.
@@ -489,6 +494,12 @@ class DesignReport:
                     "error": w.error,
                     "cost_usd": w.cost_usd,
                     "duration_ms": w.duration_ms,
+                    # The backend builds a step-by-step trace precisely so
+                    # a lens that failed is explainable. Serialising the
+                    # error but dropping the trace made a measured round of
+                    # 5 failed lenses diagnosable only by guessing from the
+                    # error string. Bounded: a diagnostic, not a payload.
+                    "trace": (w.raw_stdout_preview or "")[:_MAX_TRACE_CHARS],
                 }
                 for w in self.workers
             ],
