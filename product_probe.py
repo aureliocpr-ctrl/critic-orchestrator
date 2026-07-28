@@ -27,17 +27,54 @@ Then each promise is either kept or broken, with the real output.
 
 WHAT IS DELIBERATELY NOT A PROMISE
 ==================================
-Extraction is where danger is refused, before any policy question:
-`pip install`, `sudo`, `rm`, `curl | sh`, `git push`, `docker run`,
-`shutdown` and friends are never executed. A README can legitimately
-document a destructive or outbound command, and this probe must not become
-the way one gets run. Execution itself reuses `exec_policy` (off by
-default, operator-named roots) and the ephemeral worktree from
-`pinned_exec` — no second sandbox is invented here.
+Two gates, deliberately different in kind, because the first one alone
+was measured to fail.
+
+1. A PATTERN BLOCKLIST refuses setup, destruction and outbound traffic:
+   `pip install`, `sudo`, `rm`, `curl | sh`, `git push`, `docker run`,
+   `shutdown`, and anything that would REINTRODUCE a shell (`bash -c`,
+   `cmd /c`, `powershell -c`, `env`, `xargs`, `eval`) — argv-only
+   execution is worthless if one argv element hands the shell back. It
+   is applied to BOTH the raw command and the tokenised argv, because
+   checking one representation while executing another is what let
+   `pip "install" evil` through.
+
+2. AN ALLOWLIST OF ARGV SHAPES for interpreters, because a blocklist only
+   ever learns the payload someone already imagined. `python -c "<code>"`
+   walked through gate 1 entirely (confirmed by writing a canary file to
+   disk), and when the allowlist was first added it rested on an exact
+   list of interpreter NAMES — a blocklist one level down — so
+   `python3.11 -c` walked through that (6 of 9 versioned spellings did).
+   Interpreters are now matched as a family, and their argv must be a
+   shape we can name: informational flags, `-m <dotted module>`, or a
+   script file resolving inside the tree. Everything else is refused
+   without having had to be imagined. The line it draws: code arriving IN
+   the command string is refused; code arriving FROM the artifact is what
+   a product probe is for.
+
+Execution reuses `exec_policy` (off by default, operator-named roots) and
+the ephemeral worktree from `pinned_exec` — no second sandbox is invented
+here — with the environment reduced to `minimal_exec_env` (an allowlist of
+what a process needs to *start*; promises used to inherit the server's
+provider API keys, verified by reading one back).
 
 An entry point's testable promise is `--help`, not its real job with
 invented arguments: "the command exists and starts" is checkable and
-honest, while guessing arguments would manufacture failures.
+honest, while guessing arguments would manufacture failures. A
+`[project.scripts]` entry point cannot be found in a disposable worktree
+at all — nothing is installed there — so it is reported `not_verifiable`,
+never broken: accusing an artifact of a defect the probe manufactured is
+how a gate earns being switched off.
+
+WHAT THIS STILL DOES NOT DO, stated rather than hidden
+======================================================
+Running the artifact's documented commands means running the artifact's
+code, and the probe measures a PROXY: a command that exits 0 kept its
+promise. A command can exit 0 and deliver nothing. An unrecognised binary
+that takes a program on its command line is not covered by gate 2. And a
+promise expressible only as an API call, not a terminal command, is
+invisible here — for such a project the probe reports what it could not
+check rather than a clean bill.
 """
 from __future__ import annotations
 
@@ -358,6 +395,52 @@ def _is_refused(command: str) -> bool:
     return _refusal_reason(command) is not None
 
 
+#: An rst directive opening a literal block, with its language:
+#: `.. code-block:: bash`, `.. code:: sh`, `.. sourcecode:: console`.
+_RST_DIRECTIVE_RE = re.compile(
+    r"^\s*\.\.\s+(?:code-block|code|sourcecode)::\s*([A-Za-z0-9_+-]+)\s*$"
+)
+
+
+def _rst_shell_lines(text: str) -> list[str]:
+    """Lines inside rst shell literal blocks.
+
+    README.rst and README.txt were advertised as candidates and never
+    parsed — the reader only understood markdown fences — so an rst
+    project got a silent "no promises found" that reads like "nothing to
+    check". An rst literal block is the indented run of lines after the
+    directive; it ends at the first non-blank line back at or below the
+    directive's own indentation.
+    """
+    out: list[str] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        m = _RST_DIRECTIVE_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        is_shell = m.group(1).lower() in _SHELL_FENCE_LANGS
+        base_indent = len(lines[i]) - len(lines[i].lstrip())
+        i += 1
+        # Skip the directive's options (`:linenos:`) and the blank line.
+        while i < len(lines) and (not lines[i].strip()
+                                  or lines[i].strip().startswith(":")):
+            i += 1
+        while i < len(lines):
+            line = lines[i]
+            if not line.strip():
+                i += 1
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent <= base_indent:
+                break
+            if is_shell:
+                out.append(line)
+            i += 1
+    return out
+
+
 def _doc_promises(root: Path) -> list[Promise]:
     out: list[Promise] = []
     candidates: list[Path] = []
@@ -375,6 +458,13 @@ def _doc_promises(root: Path) -> list[Promise]:
         except OSError:
             continue
         rel = str(path.relative_to(root)).replace("\\", "/")
+        if path.suffix.lower() in (".rst", ".txt"):
+            for line in _rst_shell_lines(text):
+                cmd = _clean_line(line)
+                if cmd and not _is_refused(cmd):
+                    out.append(Promise(command=cmd, kind="doc_command",
+                                       source=rel))
+            continue
         in_fence = False
         fence_is_shell = False
         for line in text.splitlines():
@@ -472,7 +562,7 @@ def probe_report(
     root = Path(root)
     by_command = {o.get("command"): o for o in outcomes}
     rows: list[dict[str, Any]] = []
-    kept = broken = not_run = 0
+    kept = broken = not_run = not_verifiable = 0
     for p in promises:
         o = by_command.get(p.command)
         if o is None:
@@ -480,6 +570,26 @@ def probe_report(
             rows.append({
                 "command": p.command, "kind": p.kind, "source": p.source,
                 "kept": False, "why": "not run",
+            })
+            continue
+        # NOT VERIFIABLE ≠ BROKEN. A [project.scripts] entry point can
+        # never be found inside a disposable worktree: nothing is
+        # installed there, and installing is a refused command. Scoring
+        # it broken accuses the artifact of a defect the probe itself
+        # manufactured — and every console_script promise would fail,
+        # systematically, which is how a gate earns being switched off.
+        # An entry point that EXISTS and fails is still broken.
+        if p.kind == "console_script" and o.get("exit_code") == 127:
+            not_verifiable += 1
+            rows.append({
+                "command": p.command, "kind": p.kind, "source": p.source,
+                "kept": False, "not_verifiable": True,
+                "exit_code": o.get("exit_code"),
+                "why": ("the entry point is declared in pyproject.toml but "
+                        "the package is not installed in this environment, "
+                        "and the probe cannot install it (installation is a "
+                        "refused command). Install the package and re-run "
+                        "to check this promise."),
             })
             continue
         if p.expects_exit:
@@ -514,6 +624,10 @@ def probe_report(
         status = "broken_promises"
     elif not_run:
         status = "incomplete"
+    elif not_verifiable and not kept:
+        # Nothing could actually be checked. Reporting "promises kept"
+        # here would be the silent pass this module exists to catch.
+        status = "nothing_verifiable"
     else:
         status = "promises_kept"
 
@@ -527,6 +641,8 @@ def probe_report(
     }
     if not_run:
         report["summary"]["not_run"] = not_run
+    if not_verifiable:
+        report["summary"]["not_verifiable"] = not_verifiable
     if not promises:
         report["note"] = (
             "No runnable promise found. Looked for shell fences in "
@@ -694,8 +810,13 @@ def run_product_probe(
     """
     repo = policy.check(project_dir)
     with ephemeral_worktree(repo) as wt:
-        promises = extract_promises(wt, cap=cap)
-        truncated = len(extract_promises(wt, cap=cap + 1)) > len(promises)
+        # ONE extraction. Detecting truncation by extracting a second
+        # time doubled the directory walk and re-read a tree that may
+        # already be gone; asking for one more than the cap answers the
+        # same question from a single pass.
+        found = extract_promises(wt, cap=cap + 1)
+        truncated = len(found) > cap
+        promises = found[:cap]
         outcomes: list[dict[str, Any]] = []
         cancelled = False
         for p in promises:

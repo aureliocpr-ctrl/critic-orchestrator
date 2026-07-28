@@ -559,3 +559,85 @@ def test_the_probe_does_not_fabricate_an_import_path(tmp_path: Path) -> None:
         tmp_path, timeout_s=60)
     assert out["exit_code"] != 0, (
         "an uninstalled src-layout package was made to work by the probe")
+
+
+# ---------------------------------------------------------------------------
+# The minor findings, each verified read-only before being cured.
+# ---------------------------------------------------------------------------
+
+def test_an_uninstalled_console_script_is_not_called_broken(
+        toy_repo: Path) -> None:
+    """DeepSeek + Kimi, high: a [project.scripts] entry point can never
+    be found inside a disposable worktree, because installing is a
+    refused command. Scoring it BROKEN accuses the artifact of a defect
+    the probe manufactured — and a gate that cries wolf gets switched
+    off. It is not verifiable here, and that is what it must say."""
+    (toy_repo / "pyproject.toml").write_text(
+        '[project]\nname = "toy"\nversion = "0"\n\n'
+        '[project.scripts]\ntoycmd_absent_xyz = "toy:main"\n')
+    _commit("declare an entry point", cwd=toy_repo)
+    policy = ExecPolicy(enabled=True, roots=[toy_repo.parent])
+    d = run_product_probe(toy_repo, policy=policy,
+                          per_promise_timeout_s=60).as_dict()
+    row = next(r for r in d["outcomes"]
+               if r["command"].startswith("toycmd_absent_xyz"))
+    assert row["kept"] is False
+    assert row.get("not_verifiable") is True, row
+    assert "not installed" in (row.get("why") or "").lower(), row
+    # …and it must not be counted as a broken promise.
+    assert d["summary"]["broken"] == 0, d["summary"]
+    assert d["summary"].get("not_verifiable", 0) == 1, d["summary"]
+
+
+def test_an_installed_console_script_that_fails_is_still_broken(
+        tmp_path: Path) -> None:
+    """The cure must not become an excuse: a script that EXISTS and
+    fails is a real broken promise."""
+    from critic_orchestrator.product_probe import probe_report
+    p = Promise(command="realcmd --help", kind="console_script",
+                source="pyproject.toml")
+    rep = probe_report(tmp_path, [p], [{
+        "command": "realcmd --help", "exit_code": 2, "timed_out": False,
+        "output": "usage error",
+    }])
+    assert rep["summary"]["broken"] == 1
+    assert rep["outcomes"][0].get("not_verifiable") is not True
+
+
+def test_an_rst_readme_is_actually_parsed(tmp_path: Path) -> None:
+    """README.rst was advertised as a candidate and never parsed: the
+    fence reader only understood markdown, so an rst project got a
+    silent 'no promises found' that read like 'nothing to check'."""
+    (tmp_path / "README.rst").write_text(
+        "Usage\n=====\n\nRun it:\n\n.. code-block:: bash\n\n"
+        "    python -m mypkg --help\n    python -m mypkg --version\n\n"
+        "Next paragraph, not a command.\n")
+    got = [p.command for p in extract_promises(tmp_path)]
+    assert "python -m mypkg --help" in got, got
+    assert "python -m mypkg --version" in got, got
+    assert "Next paragraph, not a command." not in got
+
+
+def test_rst_non_shell_blocks_are_not_promises(tmp_path: Path) -> None:
+    (tmp_path / "README.rst").write_text(
+        "Usage\n=====\n\n.. code-block:: python\n\n"
+        "    import mypkg\n    mypkg.run()\n")
+    assert [p.command for p in extract_promises(tmp_path)] == []
+
+
+def test_promises_are_extracted_once_per_run(
+        toy_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Truncation was detected by extracting a SECOND time — double the
+    work, and a second walk of a directory that may already be gone."""
+    from critic_orchestrator import product_probe as pp
+    calls = {"n": 0}
+    real = pp.extract_promises
+
+    def _counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(pp, "extract_promises", _counting)
+    policy = ExecPolicy(enabled=True, roots=[toy_repo.parent])
+    pp.run_product_probe(toy_repo, policy=policy, per_promise_timeout_s=60)
+    assert calls["n"] == 1, f"extract_promises ran {calls['n']} times"
