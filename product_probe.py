@@ -81,6 +81,7 @@ from __future__ import annotations
 import re
 import shlex
 import sys
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,10 +89,11 @@ from typing import Any, Callable
 
 from .exec_policy import ExecPolicy
 from .pinned_exec import (
-    LEAKED_WORKTREES,
     PinnedCommand,
     PinnedExecError,
     ephemeral_worktree,
+    leak_marker,
+    leaks_since,
     run_pinned,
 )
 
@@ -796,6 +798,7 @@ def run_product_probe(
     per_promise_timeout_s: int = DEFAULT_PROMISE_TIMEOUT_S,
     cancel_check: Callable[[], bool] | None = None,
     popen_sink: list[Any] | None = None,
+    total_budget_s: float | None = None,
 ) -> ProductProbeReport:
     """Extract the promises at HEAD and run each one in a worktree.
 
@@ -809,6 +812,10 @@ def run_product_probe(
     reports what it ran, marks the rest not_run, and says `cancelled`.
     """
     repo = policy.check(project_dir)
+    # Only THIS run's leaks belong in this run's report.
+    marker = leak_marker()
+    started = time.monotonic()
+    budget_exhausted = False
     with ephemeral_worktree(repo) as wt:
         # ONE extraction. Detecting truncation by extracting a second
         # time doubled the directory walk and re-read a tree that may
@@ -823,6 +830,15 @@ def run_product_probe(
             if cancel_check is not None and cancel_check():
                 cancelled = True
                 break
+            # WALL-CLOCK BUDGET FOR THE WHOLE RUN. Only the per-promise
+            # timeout existed, so 50 promises at 600 s each was an
+            # eight-hour job nobody bounded — and the job's own timeout_s
+            # held the per-promise value, so a caller reading it was
+            # misled about when the run would end.
+            if (total_budget_s is not None
+                    and time.monotonic() - started >= total_budget_s):
+                budget_exhausted = True
+                break
             outcomes.append(run_promise(p, wt,
                                         timeout_s=per_promise_timeout_s,
                                         require_worktree=True,
@@ -830,10 +846,14 @@ def run_product_probe(
     report = probe_report(repo, promises, outcomes, truncated=truncated)
     if cancelled:
         report["cancelled"] = True
-    if LEAKED_WORKTREES:
-        # Surfaced, not swallowed: a temporary checkout left on disk is
-        # invisible until it is a disk-full outage.
-        report["leaked_worktrees"] = list(LEAKED_WORKTREES)
+    if budget_exhausted:
+        report["budget_exhausted"] = True
+        report["budget_s"] = total_budget_s
+    fresh_leaks = leaks_since(marker)
+    if fresh_leaks:
+        # Surfaced, not swallowed — and only this run's, so the warning
+        # still means something the tenth time a server serves it.
+        report["leaked_worktrees"] = fresh_leaks
     return ProductProbeReport(report)
 
 

@@ -360,6 +360,17 @@ def _product_probe_tool() -> t.Tool:
                         "`promises_truncated`, never silent."
                     ),
                 },
+                "total_budget_s": {
+                    "type": "integer",
+                    "minimum": 30, "maximum": 7200, "default": 1800,
+                    "description": (
+                        "Wall-clock budget for the WHOLE run, checked "
+                        "between promises. Without it, 50 promises at "
+                        "600 s each is an eight-hour job. Promises not "
+                        "reached are reported not_run with "
+                        "`budget_exhausted`."
+                    ),
+                },
             },
         },
     )
@@ -512,7 +523,8 @@ def _run_review_in_thread(job: Job, backend: Any | None = None) -> None:
 
 
 def _run_probe_in_thread(job: Job, *, per_promise_timeout_s: int,
-                         promise_cap: int) -> None:
+                         promise_cap: int,
+                         total_budget_s: int) -> None:
     """Background body for a product-probe job. The policy was already
     checked at start time (fail-fast); it is re-derived here because the
     check is cheap and the environment is the single source of truth.
@@ -531,6 +543,7 @@ def _run_probe_in_thread(job: Job, *, per_promise_timeout_s: int,
             # in flight ran to its full timeout while the report said
             # cancelled. The review and design paths already passed it.
             popen_sink=job.popen_handles,
+            total_budget_s=total_budget_s,
         )
     except ExecPolicyError as exc:
         _REGISTRY.mark_failed(job, f"execution policy refused: {exc}")
@@ -627,6 +640,8 @@ async def _call_tool_impl(
         timeout_pp = max(5, min(600, timeout_pp))
         cap = int(arguments.get("promise_cap") or 25)
         cap = max(1, min(50, cap))
+        total_budget = int(arguments.get("total_budget_s") or 1800)
+        total_budget = max(30, min(7200, total_budget))
         # Fail-fast: a caller without the operator opt-in learns NOW,
         # with the knobs named, instead of from a job that fails later.
         try:
@@ -638,11 +653,15 @@ async def _call_tool_impl(
             claim=f"product_probe: {resolved}",
             project_dir=resolved,
             workers=[],
-            timeout_s=timeout_pp,
+            # The job's timeout_s must be the budget for the WHOLE run.
+            # It used to hold the PER-PROMISE value, so a caller reading
+            # it was told 300 s about a job that could run for hours.
+            timeout_s=total_budget,
         )
         _EXECUTOR.submit(_run_probe_in_thread, job,
                          per_promise_timeout_s=timeout_pp,
-                         promise_cap=cap)
+                         promise_cap=cap,
+                         total_budget_s=total_budget)
         return [t.TextContent(type="text",
                                text=json.dumps(job.as_dict()))]
 

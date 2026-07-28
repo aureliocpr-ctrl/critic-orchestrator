@@ -641,3 +641,77 @@ def test_promises_are_extracted_once_per_run(
     policy = ExecPolicy(enabled=True, roots=[toy_repo.parent])
     pp.run_product_probe(toy_repo, policy=policy, per_promise_timeout_s=60)
     assert calls["n"] == 1, f"extract_promises ran {calls['n']} times"
+
+
+# ---------------------------------------------------------------------------
+# ROUND 4. DeepSeek, 3/3 lenses, zero criticals — and one high that is a
+# defect I introduced two commits earlier while curing GLM's leak finding.
+# ---------------------------------------------------------------------------
+
+def test_only_this_runs_leaks_are_reported(
+        toy_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """LEAKED_WORKTREES is process-global and append-only, so a leak from
+    an earlier run reappeared in EVERY later report — for the rest of the
+    server's life, and even after the directory was cleaned up by
+    something else. A signal that cannot be trusted becomes noise, and
+    noise gets ignored: the same 'gate that cries wolf' failure the leak
+    warning was added to prevent."""
+    from critic_orchestrator import pinned_exec as pe
+    monkeypatch.setattr(pe, "LEAKED_WORKTREES",
+                        ["C:/stale/from/a/previous/run"])
+    policy = ExecPolicy(enabled=True, roots=[toy_repo.parent])
+    d = run_product_probe(toy_repo, policy=policy,
+                          per_promise_timeout_s=60).as_dict()
+    assert "leaked_worktrees" not in d, d.get("leaked_worktrees")
+
+
+def test_a_leak_from_this_run_is_reported(
+        toy_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """…and the cure must not silence the real signal."""
+    from critic_orchestrator import pinned_exec as pe
+    real = pe.ephemeral_worktree
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _leaky(repo, ref="HEAD"):
+        with real(repo, ref) as wt:
+            yield wt
+        pe.LEAKED_WORKTREES.append("C:/leaked/right/now")
+
+    monkeypatch.setattr(pe, "LEAKED_WORKTREES", [])
+    monkeypatch.setattr("critic_orchestrator.product_probe."
+                        "ephemeral_worktree", _leaky)
+    policy = ExecPolicy(enabled=True, roots=[toy_repo.parent])
+    d = run_product_probe(toy_repo, policy=policy,
+                          per_promise_timeout_s=60).as_dict()
+    assert d.get("leaked_worktrees") == ["C:/leaked/right/now"], d
+
+
+def test_the_whole_probe_has_a_wall_clock_budget(toy_repo: Path) -> None:
+    """DeepSeek + Kimi, corroborated: the only timeout was PER PROMISE, so
+    50 promises at 600 s each is an 8-hour job nobody bounded — and the
+    job's own timeout_s field stored the per-promise value, so a caller
+    reading it was misled about when the run would end."""
+    readme = toy_repo / "README.md"
+    readme.write_text(
+        "```bash\npython -m toymod --help\n"
+        "python -m toymod --version\npython -m toymod --other\n```\n")
+    (toy_repo / "toymod" / "__main__.py").write_text(
+        "import time\ntime.sleep(2)\nprint('slow')\n")
+    _commit("three slow promises", cwd=toy_repo)
+    policy = ExecPolicy(enabled=True, roots=[toy_repo.parent])
+    d = run_product_probe(toy_repo, policy=policy,
+                          per_promise_timeout_s=60,
+                          total_budget_s=1).as_dict()
+    assert d.get("budget_exhausted") is True, d
+    assert d["summary"].get("not_run", 0) >= 1, d["summary"]
+
+
+def test_the_budget_does_not_cut_a_run_that_fits(toy_repo: Path) -> None:
+    policy = ExecPolicy(enabled=True, roots=[toy_repo.parent])
+    d = run_product_probe(toy_repo, policy=policy,
+                          per_promise_timeout_s=60,
+                          total_budget_s=600).as_dict()
+    assert d.get("budget_exhausted") is not True
+    assert d["status"] == "promises_kept", d

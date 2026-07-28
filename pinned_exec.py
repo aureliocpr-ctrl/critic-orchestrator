@@ -48,6 +48,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,11 +61,35 @@ class PinnedExecError(Exception):
     """A refusal: the request is not a shape this module will execute."""
 
 
-#: Temporary checkouts whose cleanup did not succeed. Append-only, in
-#: process memory: a leak that leaves no trace is only ever discovered as
-#: a disk-full outage, long after the run that caused it. Callers can read
-#: this to surface the leak; nothing here deletes anything on its own.
+#: Temporary checkouts whose cleanup did not succeed. Process-wide and
+#: append-only, in memory: a leak that leaves no trace is only ever
+#: discovered as a disk-full outage, long after the run that caused it.
+#: Nothing here deletes anything on its own.
+#:
+#: READ IT THROUGH `leak_marker()` / `leaks_since()`, never directly. Two
+#: independent reviewers caught the first version of this: reporting the
+#: whole list meant one leak reappeared in EVERY later report for the
+#: life of the process — even after the directory had been removed by
+#: something else. A warning that repeats forever stops being read, which
+#: is the exact "gate that cries wolf" failure this list was added to
+#: prevent.
 LEAKED_WORKTREES: list[str] = []
+
+#: Probes can run concurrently (the MCP server has a thread pool), and a
+#: list mutated from several threads while another reads it is a race.
+_LEAK_LOCK = threading.Lock()
+
+
+def leak_marker() -> int:
+    """Snapshot the leak list. Pass to `leaks_since` after the run."""
+    with _LEAK_LOCK:
+        return len(LEAKED_WORKTREES)
+
+
+def leaks_since(marker: int) -> list[str]:
+    """Leaks recorded AFTER `marker` — i.e. by this run alone."""
+    with _LEAK_LOCK:
+        return list(LEAKED_WORKTREES[marker:])
 
 
 #: A pytest selector: path segments, then optional ``::name`` parts. No
@@ -185,7 +210,8 @@ def ephemeral_worktree(repo: Path, ref: str = "HEAD") -> Iterator[Path]:
         # workspace has already lost 83 GB to orphaned resources nobody
         # was counting. So: notice, record, and let a caller ask.
         if target.exists() or container.exists():
-            LEAKED_WORKTREES.append(str(container))
+            with _LEAK_LOCK:
+                LEAKED_WORKTREES.append(str(container))
 
 
 def _cap(text: str, limit: int) -> str:
