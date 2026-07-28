@@ -96,6 +96,14 @@ _VERSION_SEGMENT_RE = re.compile(r"/v\d+[a-z]*\d*$", re.IGNORECASE)
 #: verdict ends as an error instead of spinning.
 _MAX_VERDICT_CORRECTIONS: int = 2
 
+#: How many turns carrying NEITHER a tool call NOR extractable JSON are
+#: nudged before the reviewer is failed. Measured need: 5 of 9 lenses in
+#: one 3-provider round died with this exact error and an EMPTY preview,
+#: because the loop aborted on the first such turn and discarded every
+#: step already paid for. Reasoning models legitimately produce a turn
+#: whose content is empty (everything went to reasoning_content).
+_MAX_EMPTY_TURNS: int = 3
+
 #: HTTP statuses worth retrying: the server is telling us to WAIT, not
 #: that the request is wrong. Measured need — Kimi k3 scored 2/3 on repeat
 #: and the failure was 429 "engine currently overloaded", which threw away
@@ -1007,6 +1015,8 @@ class AgenticApiBackend:
         reads_done = 0
         investigation_challenged = False
         corrections = 0
+        #: Turns with neither a tool call nor a parsable verdict.
+        empty_turns = 0
         require_investigation = self.require_investigation
         while steps < self.max_steps:
             if cancel_check is not None and cancel_check():
@@ -1107,15 +1117,39 @@ class AgenticApiBackend:
 
             if not calls:
                 # No tool call: accept a well-formed verdict in the prose,
-                # otherwise report honestly rather than inventing one.
+                # otherwise NUDGE rather than discard the run. Aborting
+                # here cost 5 of 9 lenses in one measured round — every
+                # step already spent, thrown away over one silent turn.
                 obj = _extract_json_object(msg.get("content") or "")
                 if obj is None:
-                    return BackendResult(
-                        verdict=None,
-                        error=("model stopped without calling "
-                               "submit_verdict and emitted no JSON object"),
-                        raw_preview=(msg.get("content") or "")[:500],
+                    empty_turns += 1
+                    thinking = str(msg.get("reasoning_content") or "")
+                    trace.append(
+                        f"step{steps}:empty-turn{empty_turns}"
+                        + (f"(reasoning {len(thinking)}ch)"
+                           if thinking else "(no content)")
                     )
+                    if empty_turns >= _MAX_EMPTY_TURNS:
+                        return BackendResult(
+                            verdict=None,
+                            error=(f"{empty_turns} empty turns: the model "
+                                   "produced neither a tool call nor a "
+                                   "verdict after being asked to"),
+                            raw_preview=_ctx_trace(),
+                        )
+                    # Keep the assistant turn in history so the exchange
+                    # stays well-formed, then say what is missing.
+                    messages.append({
+                        "role": "assistant",
+                        "content": msg.get("content") or "",
+                    })
+                    messages.append({"role": "user", "content": (
+                        "Your last turn contained no tool call and no "
+                        "verdict. Continue the investigation with the "
+                        "fs_* tools, or call submit_verdict now with what "
+                        "you have. Do not reply with prose alone."
+                    )})
+                    continue
                 missing = _missing_required(obj, spec.schema)
                 if missing:
                     return BackendResult(
@@ -1203,7 +1237,7 @@ class AgenticApiBackend:
                     # tells you nothing about how, and comparing a healthy
                     # run against a failed one is the whole diagnostic.
                     return BackendResult(verdict=args, error=None,
-                                          raw_preview=" | ".join(trace))
+                                          raw_preview=_ctx_trace())
 
                 trace.append(
                     f"step{steps}:{name}"

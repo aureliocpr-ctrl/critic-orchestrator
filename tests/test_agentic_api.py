@@ -543,7 +543,16 @@ def test_plain_text_json_is_accepted_as_a_fallback(tmp_path: Path) -> None:
 
 
 def test_unparseable_final_message_is_an_error(tmp_path: Path) -> None:
-    scripted = _Scripted([_assistant_text("I could not review this.")])
+    """A model that only ever emits prose must yield an ERROR, never an
+    invented verdict.
+
+    (The mechanism changed, the contract did not: this used to fail on
+    the FIRST prose turn. Aborting there cost 5 of 9 lenses in a measured
+    3-provider round, so a prose turn is now nudged up to _MAX_EMPTY_TURNS
+    times — after which it still fails, which is what this pins.)"""
+    scripted = _Scripted([
+        _assistant_text("I could not review this.") for _ in range(4)
+    ])
     with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
                scripted):
         res = _backend().run_worker(_spec(), tmp_path, 60)
@@ -1195,3 +1204,62 @@ def test_fs_grep_line_numbers_stay_exact_for_normal_files(
     p.write_text("a = 1\nb = 2\ntarget = 3\n", encoding="utf-8")
     out = _run_tool("fs_grep", {"pattern": "target"}, tmp_path, "n0nce")
     assert "mod.py:3:" in out
+
+
+# ---------------------------------------------------------------------------
+# LENS ATTRITION, measured: 5 of 9 lenses died across a 3-provider round
+# with the SAME error and an EMPTY preview - "model stopped without calling
+# submit_verdict and emitted no JSON object". The loop aborted the whole
+# reviewer on the FIRST turn that carried neither a tool call nor JSON,
+# throwing away every step already paid for. A malformed verdict already
+# gets fed back for correction; an empty turn deserves the same courtesy.
+# ---------------------------------------------------------------------------
+
+def test_an_empty_turn_is_nudged_not_fatal() -> None:
+    scripted = _Scripted([
+        {"choices": [{"message": {"role": "assistant", "content": ""}}]},
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": True, "evidence": "e"}),
+    ])
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend_noinv().run_worker(_spec(), Path("."), 60)
+    assert res.error is None, res.error
+    assert res.verdict == {"claim_holds": True, "evidence": "e"}
+    # The nudge really travelled, as a user turn the model can act on.
+    second = scripted.requests[1]["messages"]
+    assert any(m.get("role") == "user" and "submit_verdict" in str(
+        m.get("content")) for m in second[2:]), second[2:]
+
+
+def test_repeated_empty_turns_still_fail_honestly() -> None:
+    """The nudge must not become an infinite loop: a model that says
+    nothing three times is a failed reviewer, reported as one."""
+    scripted = _Scripted([
+        {"choices": [{"message": {"role": "assistant", "content": ""}}]}
+        for _ in range(6)
+    ])
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend_noinv().run_worker(_spec(), Path("."), 60)
+    assert res.verdict is None
+    assert "empty" in (res.error or "").lower()
+
+
+def test_reasoning_only_turn_is_surfaced_for_diagnosis() -> None:
+    """A reasoning model can put everything in reasoning_content and
+    leave content empty. An empty preview made that indistinguishable
+    from a dead connection - which is how a whole round of lens failures
+    stayed unexplained."""
+    scripted = _Scripted([
+        {"choices": [{"message": {
+            "role": "assistant", "content": "",
+            "reasoning_content": "I should look at the sandbox first"}}]},
+        _assistant_tool_call("submit_verdict",
+                             {"claim_holds": True, "evidence": "e"}),
+    ])
+    with patch("critic_orchestrator.agentic_api.urllib.request.urlopen",
+               scripted):
+        res = _backend_noinv().run_worker(_spec(), Path("."), 60)
+    assert res.error is None
+    assert "empty-turn" in (res.raw_preview or "")
