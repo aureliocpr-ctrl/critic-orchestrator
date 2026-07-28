@@ -10,6 +10,27 @@ cured.
 
 Sections below, newest arc first.
 
+### How this release was verified, and where the verification stops
+
+Four cross-model rounds on the execution surface (`product_probe`,
+`exec_policy`, `pinned_exec`), each provider running the three no-claim
+design lenses in parallel. Criticals per round: **3 → 1 → 2 → 0**. Every
+one was verified against the code before being cured, and the ones that
+turned out to be false are recorded as false rather than quietly dropped.
+
+**The final round was clean on two independent models, not three.**
+DeepSeek and GLM both delivered full 3/3 lens coverage with zero
+criticals; Kimi could not participate (provider account out of balance),
+and its absence is a real gap rather than a formality — in earlier rounds
+Kimi found two criticals neither other model saw. A third opinion on this
+code is still owed.
+
+What that means for you: execution is **off by default**. Without
+`CRITIC_ALLOW_EXEC=1` and an explicit `CRITIC_EXEC_ROOTS`, this package
+reads files and calls model endpoints; it runs nothing. Every critical
+found in this arc lived on the execution surface, which is the surface
+you have to switch on deliberately.
+
 ### Four criticals, found by the product on itself
 
 The wirings below gave the product an execution surface. Running its own
