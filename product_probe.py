@@ -51,11 +51,11 @@ from typing import Any, Callable
 
 from .exec_policy import ExecPolicy
 from .pinned_exec import (
+    LEAKED_WORKTREES,
     PinnedCommand,
     PinnedExecError,
     ephemeral_worktree,
     run_pinned,
-    worktree_pythonpath_env,
 )
 
 #: Fences whose content is shell. A ```python fence is not a promise a
@@ -602,6 +602,7 @@ def run_promise(
     promise: Promise, cwd: Path, *,
     timeout_s: int = DEFAULT_PROMISE_TIMEOUT_S,
     require_worktree: bool = False,
+    popen_sink: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Execute ONE promise in `cwd`. Never raises: every failure mode is
     an outcome row the report can score.
@@ -628,9 +629,19 @@ def run_promise(
                 "output": f"refused: {contain}"}
     cmd = PinnedCommand(argv=argv, label=promise.command)
     try:
+        # NO PYTHONPATH OVERLAY HERE, and that is the fix for two defects
+        # at once. The overlay belongs to the FALSIFICATION probe, whose
+        # whole job is out-importing an installed copy; the product probe
+        # copied it and thereby (a) handed the reviewed repo code at
+        # INTERPRETER STARTUP — a committed sitecustomize.py fires before
+        # the documented command does, measured both ways: absent without
+        # the overlay, present with it — and (b) fabricated an import path
+        # no real user would have, so an uninstalled src-layout package's
+        # promise "passed" because we manufactured the environment. A
+        # probe that manufactures the environment measures itself.
         res = run_pinned(cmd, cwd, timeout_s=timeout_s,
                          require_worktree=require_worktree,
-                         extra_env=worktree_pythonpath_env(Path(cwd)))
+                         popen_sink=popen_sink)
     except PinnedExecError as exc:
         # run_pinned raises on spawn failure; "no such executable" is the
         # report's 127 contract (a promised entry point that does not
@@ -668,6 +679,7 @@ def run_product_probe(
     cap: int = DEFAULT_PROMISE_CAP,
     per_promise_timeout_s: int = DEFAULT_PROMISE_TIMEOUT_S,
     cancel_check: Callable[[], bool] | None = None,
+    popen_sink: list[Any] | None = None,
 ) -> ProductProbeReport:
     """Extract the promises at HEAD and run each one in a worktree.
 
@@ -692,10 +704,15 @@ def run_product_probe(
                 break
             outcomes.append(run_promise(p, wt,
                                         timeout_s=per_promise_timeout_s,
-                                        require_worktree=True))
+                                        require_worktree=True,
+                                        popen_sink=popen_sink))
     report = probe_report(repo, promises, outcomes, truncated=truncated)
     if cancelled:
         report["cancelled"] = True
+    if LEAKED_WORKTREES:
+        # Surfaced, not swallowed: a temporary checkout left on disk is
+        # invisible until it is a disk-full outage.
+        report["leaked_worktrees"] = list(LEAKED_WORKTREES)
     return ProductProbeReport(report)
 
 

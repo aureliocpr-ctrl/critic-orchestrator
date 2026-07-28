@@ -526,6 +526,11 @@ def _run_probe_in_thread(job: Job, *, per_promise_timeout_s: int,
             cap=promise_cap,
             per_promise_timeout_s=per_promise_timeout_s,
             cancel_check=lambda: job.aborted,
+            # Without this the registry's cancel had nothing to kill:
+            # cancel_check is only consulted BETWEEN promises, so the one
+            # in flight ran to its full timeout while the report said
+            # cancelled. The review and design paths already passed it.
+            popen_sink=job.popen_handles,
         )
     except ExecPolicyError as exc:
         _REGISTRY.mark_failed(job, f"execution policy refused: {exc}")

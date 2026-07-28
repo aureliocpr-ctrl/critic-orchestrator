@@ -498,3 +498,64 @@ def test_both_views_of_a_command_are_checked() -> None:
         assert _refusal_reason(cmd) is not None, cmd
         argv = _split_command(cmd)
         assert {"install", "push", "i"} & set(argv), argv
+
+
+# ---------------------------------------------------------------------------
+# ROUND 3, all three providers on the cured code. Two more, both verified
+# before curing - and the second only after my FIRST test of it was wrong.
+# ---------------------------------------------------------------------------
+
+def test_cancel_can_actually_kill_a_running_promise(toy_repo: Path) -> None:
+    """Kimi, critical: `cancel` killed job.popen_handles, and the probe
+    never put anything in it - so a promise mid-flight ran to its full
+    timeout while the worktree was deleted around it. The review path
+    already registered its handles; the probe path re-shipped the cured
+    class."""
+    handles: list = []
+    readme = toy_repo / "README.md"
+    readme.write_text("```bash\npython -m toymod --help\n```\n")
+    _commit("single promise", cwd=toy_repo)
+    policy = ExecPolicy(enabled=True, roots=[toy_repo.parent])
+    run_product_probe(toy_repo, policy=policy, per_promise_timeout_s=60,
+                      popen_sink=handles)
+    assert handles, "no subprocess handle was registered; cancel is blind"
+    assert all(hasattr(h, "pid") for h in handles), handles
+
+
+def test_a_committed_sitecustomize_no_longer_runs(tmp_path: Path) -> None:
+    """Kimi, critical (second channel), verified: our own PYTHONPATH
+    overlay gave the reviewed repo code at INTERPRETER STARTUP - a
+    sitecustomize.py fires before the documented command does. Measured
+    both ways: without the overlay it does not fire, with it, it does.
+    So the channel was self-inflicted, not inherent.
+
+    (My first test of this used `python --version`, which exits before
+    site loads, and reported a false negative on a true finding.)"""
+    canary = tmp_path / "SITECUSTOMIZE_RAN.txt"
+    (tmp_path / "sitecustomize.py").write_text(
+        f"open(r'{canary}', 'w').write('startup')\n")
+    (tmp_path / "demo.py").write_text("print('demo output')\n")
+    out = run_promise(
+        Promise(command="python demo.py", kind="doc_command",
+                source="README.md"),
+        tmp_path, timeout_s=60)
+    assert out["exit_code"] == 0, out.get("output")
+    assert "demo output" in (out.get("output") or "")
+    assert not canary.exists(), (
+        "repo-controlled code still executes at interpreter startup")
+
+
+def test_the_probe_does_not_fabricate_an_import_path(tmp_path: Path) -> None:
+    """The same overlay ALSO made promises pass that a real user's
+    environment would fail: an uninstalled src-layout package resolved
+    only because we put src/ on the path. A probe that manufactures the
+    environment measures itself, not the artifact."""
+    (tmp_path / "src" / "spkg").mkdir(parents=True)
+    (tmp_path / "src" / "spkg" / "__init__.py").write_text("")
+    (tmp_path / "src" / "spkg" / "__main__.py").write_text("print('hi')\n")
+    out = run_promise(
+        Promise(command="python -m spkg", kind="module_main",
+                source="README.md"),
+        tmp_path, timeout_s=60)
+    assert out["exit_code"] != 0, (
+        "an uninstalled src-layout package was made to work by the probe")

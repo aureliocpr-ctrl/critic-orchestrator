@@ -51,13 +51,20 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from .orchestrator import kill_process_tree
 
 
 class PinnedExecError(Exception):
     """A refusal: the request is not a shape this module will execute."""
+
+
+#: Temporary checkouts whose cleanup did not succeed. Append-only, in
+#: process memory: a leak that leaves no trace is only ever discovered as
+#: a disk-full outage, long after the run that caused it. Callers can read
+#: this to surface the leak; nothing here deletes anything on its own.
+LEAKED_WORKTREES: list[str] = []
 
 
 #: A pytest selector: path segments, then optional ``::name`` parts. No
@@ -171,6 +178,14 @@ def ephemeral_worktree(repo: Path, ref: str = "HEAD") -> Iterator[Path]:
             except PinnedExecError:
                 pass
         shutil.rmtree(container, ignore_errors=True)
+        # `ignore_errors=True` is the right call — a locked file must not
+        # turn a finished review into an exception — but swallowing the
+        # outcome is not. A checkout left on disk with no trace is a leak
+        # whose only symptom arrives as "disk full" much later, and this
+        # workspace has already lost 83 GB to orphaned resources nobody
+        # was counting. So: notice, record, and let a caller ask.
+        if target.exists() or container.exists():
+            LEAKED_WORKTREES.append(str(container))
 
 
 def _cap(text: str, limit: int) -> str:
@@ -188,6 +203,7 @@ def run_pinned(
     require_worktree: bool = False,
     extra_env: dict[str, str] | None = None,
     scrub_env: bool = True,
+    popen_sink: list[Any] | None = None,
 ) -> PinnedResult:
     """Execute a pinned argv in `cwd`. No shell, bounded, tree-killed.
 
@@ -229,6 +245,15 @@ def run_pinned(
         )
     except OSError as exc:
         raise PinnedExecError(f"could not start {cmd.label!r}: {exc}") from exc
+
+    # REGISTER BEFORE WAITING. `JobRegistry.cancel` kills whatever is in the
+    # job's handle list; a process that never lands there is uncancellable,
+    # and the caller reads killed_workers=0 while it runs to its full
+    # timeout. That exact defect was found and cured on the review path,
+    # then re-shipped here — so the registration happens between spawn and
+    # the first blocking wait, where a racing cancel can still see it.
+    if popen_sink is not None:
+        popen_sink.append(proc)
 
     timed_out = False
     try:
