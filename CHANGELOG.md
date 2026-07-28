@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased — Four criticals, found by the product on itself
+## 0.8.0 — 2026-07-28 — Execution reaches third-party providers, and the product audits itself
+
+One release, three arcs, in the order they happened: the no-claim design
+review and the deterministic audit; the three wirings that gave the product
+a real execution surface; and then what its own lenses found when pointed at
+that surface — six criticals in one night, each verified before it was
+cured.
+
+Sections below, newest arc first.
+
+### Four criticals, found by the product on itself
 
 The wirings below gave the product an execution surface. Running its own
 lenses over that surface — one design review, then the same three modules
@@ -88,7 +98,7 @@ it protects.
   refused); two GLM highs are detection-lens artifacts asking for runtime
   observability of safeguards that unit tests already pin.
 
-## Unreleased — The three wirings: execution reaches third-party providers
+### The three wirings: execution reaches third-party providers
 
 The remaining residue was three instances of the same class this product
 hunts — *built-never-wired* — and closing them was gated on its own grid.
@@ -157,7 +167,7 @@ hunts — *built-never-wired* — and closing them was gated on its own grid.
   denial exactly as worded, and the harness read `report` where the tool
   returns `result` — both fixed in the experiment, not papered over.
 
-## Unreleased — Design review: the no-claim gate + deterministic audit
+### Design review: the no-claim gate + deterministic audit
 
 ### Added
 - `design_workers.py` + MCP tool `start_design_review` — adversarial review of

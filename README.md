@@ -355,7 +355,7 @@ that the data showed didn't help.
 
 ## Verified
 
-- Test suite: **93/93 green** in ~3 s (`python -m pytest tests -q`).
+- Test suite: **417 green, 2 skipped** (`python -m pytest tests -q`).
 - Claude CLI backend: end-to-end smoke via `smoke_live.py`.
 - Ghost CLI backend: **live smoke 2026-07-02** — an execution reviewer ran a
   real `pytest` inside a hidden sister (verdict + verbatim pytest summary via
@@ -367,6 +367,27 @@ that the data showed didn't help.
   `deepseek-v4-pro` (rejects `json_schema`, auto-falls-back to `json_object`).
   In both, the reasoning reviewer returned a correct verdict.
 - Anthropic API backend: unit-tested (mocked transport); live use needs your key.
+
+---
+
+## Releasing
+
+**Clean first, or you ship the tests.** `packages` excludes
+`critic_orchestrator.tests`, but a stale `build/` or `*.egg-info/` from an
+earlier build re-adds them from its own `SOURCES.txt` — measured: the wheel
+came out at 174 KB with all 17 test files in it, carrying the security
+fixtures' literal payloads into every user's `site-packages`. After the
+clean it is 106 KB with none.
+
+```bash
+rm -rf build dist *.egg-info && python -m pip wheel . --no-deps --no-build-isolation --no-cache-dir -w dist
+```
+
+Then verify the artifact rather than the intention — unzip it, confirm no
+`tests/` entries, and import every module from the extracted directory with
+nothing else on the path. The motivating case for this whole tool includes
+"a defect found by probing the built wheel that the entire internal suite
+had missed".
 
 ---
 

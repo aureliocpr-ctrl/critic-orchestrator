@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "critic-orchestrator"
-version = "0.5.0"
+version = "0.8.0"
 description = "MCP server that spawns adversarial reviewers in parallel (Claude CLI, or any OpenAI-compatible / Anthropic API) to verify a claim/fix. Anti-confabulation layer for AI coding agents."
 authors = [{name = "Aurelio Capriello", email = "aureliocpr@gmail.com"}]
 readme = "README.md"
@@ -38,8 +38,15 @@ Repository = "https://github.com/aureliocpr-ctrl/critic-orchestrator"
 Issues = "https://github.com/aureliocpr-ctrl/critic-orchestrator/issues"
 
 [tool.setuptools]
-packages = ["critic_orchestrator", "critic_orchestrator.tests"]
-package-dir = {"critic_orchestrator" = ".", "critic_orchestrator.tests" = "tests"}
+# TESTS ARE NOT SHIPPED. They used to be (`critic_orchestrator.tests`),
+# which put 17 files into every user's site-packages — including the
+# security fixtures, whose payloads are literal strings like
+# `powershell -Command evil` and the `python -c` canary that proved a
+# real bypass. Inert, but there is no reason for them to sit on someone
+# else's disk, and an on-access scanner has every reason to complain.
+# The tests live in the repository, which is where they are useful.
+packages = ["critic_orchestrator"]
+package-dir = {"critic_orchestrator" = "."}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
