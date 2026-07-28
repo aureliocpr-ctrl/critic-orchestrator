@@ -90,6 +90,16 @@ ignore = [
 #     directory name, which is `critic-orchestrator` on CI. A finding
 #     about the clone path is not a finding about the code.
 
+[tool.ruff.lint.isort]
+# DECLARED, because ruff was inferring it from the DIRECTORY NAME. The
+# package dir maps to ".", so in a checkout called `critic_orchestrator`
+# ruff sees a first-party package and sorts the imports one way; the CI
+# clone is `critic-orchestrator` (hyphen — it matches the distribution
+# name), no such package is visible there, `critic_orchestrator` gets
+# classified third-party, and the very same files fail I001. Lint whose
+# answer depends on what you named the folder you cloned into is not lint.
+known-first-party = ["critic_orchestrator"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
